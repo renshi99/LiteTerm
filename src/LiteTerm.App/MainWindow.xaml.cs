@@ -7,6 +7,7 @@ using System.Windows.Threading;
 using LiteTerm.Core.Connections;
 using LiteTerm.Infrastructure.Ssh;
 using Microsoft.Web.WebView2.Core;
+using Microsoft.Win32;
 
 namespace LiteTerm.App;
 
@@ -68,12 +69,20 @@ public partial class MainWindow : Window
             return;
         }
 
+        var authenticationType = GetSelectedAuthenticationType();
         var options = new SshConnectionOptions
         {
             Host = HostTextBox.Text.Trim(),
             Port = port,
             Username = UsernameTextBox.Text.Trim(),
-            Password = PasswordInput.Password
+            AuthenticationType = authenticationType,
+            Password = authenticationType == SshAuthenticationType.Password ? PasswordInput.Password : null,
+            PrivateKeyPath = authenticationType == SshAuthenticationType.PrivateKey
+                ? PrivateKeyPathTextBox.Text.Trim()
+                : null,
+            PrivateKeyPassphrase = authenticationType == SshAuthenticationType.PrivateKey
+                ? NullIfEmpty(PrivateKeyPassphraseInput.Password)
+                : null
         };
 
         try
@@ -98,6 +107,34 @@ public partial class MainWindow : Window
         catch (Exception exception)
         {
             MessageBox.Show(this, exception.Message, "断开失败", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
+    private void Authentication_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
+    {
+        if (PasswordPanel is null || PrivateKeyPanel is null)
+        {
+            return;
+        }
+
+        var usePrivateKey = GetSelectedAuthenticationType() == SshAuthenticationType.PrivateKey;
+        PasswordPanel.Visibility = usePrivateKey ? Visibility.Collapsed : Visibility.Visible;
+        PrivateKeyPanel.Visibility = usePrivateKey ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private void BrowsePrivateKey_Click(object sender, RoutedEventArgs e)
+    {
+        var dialog = new OpenFileDialog
+        {
+            Title = "选择 SSH 私钥",
+            Filter = "私钥文件|*.pem;*.key;id_rsa;id_ecdsa;id_ed25519|所有文件|*.*",
+            CheckFileExists = true,
+            Multiselect = false
+        };
+
+        if (dialog.ShowDialog(this) == true)
+        {
+            PrivateKeyPathTextBox.Text = dialog.FileName;
         }
     }
 
@@ -217,8 +254,21 @@ public partial class MainWindow : Window
         HostTextBox.IsEnabled = canConnect;
         PortTextBox.IsEnabled = canConnect;
         UsernameTextBox.IsEnabled = canConnect;
+        AuthenticationComboBox.IsEnabled = canConnect;
         PasswordInput.IsEnabled = canConnect;
+        PrivateKeyPathTextBox.IsEnabled = canConnect;
+        BrowsePrivateKeyButton.IsEnabled = canConnect;
+        PrivateKeyPassphraseInput.IsEnabled = canConnect;
     }
+
+    private SshAuthenticationType GetSelectedAuthenticationType()
+    {
+        return AuthenticationComboBox.SelectedIndex == 1
+            ? SshAuthenticationType.PrivateKey
+            : SshAuthenticationType.Password;
+    }
+
+    private static string? NullIfEmpty(string value) => string.IsNullOrEmpty(value) ? null : value;
 
     private void SetStatus(string text, string color)
     {

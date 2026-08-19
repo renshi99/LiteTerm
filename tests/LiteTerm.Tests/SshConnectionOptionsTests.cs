@@ -45,4 +45,30 @@ public sealed class SshConnectionOptionsTests
 
         Assert.Throws<ArgumentException>(options.Validate);
     }
+
+    [Fact]
+    public void Validate_AcceptsPrivateKeyConnectionWithoutPassphrase()
+    {
+        var options = new SshConnectionOptions
+        {
+            Host = "server.example.com",
+            Username = "tester",
+            AuthenticationType = SshAuthenticationType.PrivateKey,
+            PrivateKeyPath = @"C:\keys\id_ed25519"
+        };
+
+        options.Validate();
+    }
+
+    [Fact]
+    public void Validate_RequiresPasswordForPasswordAuthentication()
+    {
+        var options = new SshConnectionOptions
+        {
+            Host = "server.example.com",
+            Username = "tester"
+        };
+
+        Assert.Throws<ArgumentException>(options.Validate);
+    }
 }
