@@ -14,6 +14,10 @@ namespace LiteTerm.App;
 public partial class MainWindow : Window
 {
     private readonly ISshTerminalSession _session = new SshTerminalSession();
+    private readonly IKnownHostStore _knownHostStore = new JsonKnownHostStore(Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "LiteTerm",
+        "known_hosts.json"));
     private readonly ConcurrentQueue<byte[]> _outputQueue = new();
     private readonly DispatcherTimer _outputTimer;
     private int _columns = 80;
@@ -88,7 +92,7 @@ public partial class MainWindow : Window
         try
         {
             SetConnectionControls(false);
-            await _session.ConnectAsync(options, VerifyHostKey, _columns, _rows);
+            await _session.ConnectAsync(options, hostKey => VerifyHostKey(options, hostKey), _columns, _rows);
             TerminalWebView.Focus();
         }
         catch (Exception exception)
@@ -138,11 +142,53 @@ public partial class MainWindow : Window
         }
     }
 
-    private bool VerifyHostKey(HostKeyInfo hostKey)
+    private bool VerifyHostKey(SshConnectionOptions options, HostKeyInfo hostKey)
     {
-        return Dispatcher.Invoke(() => MessageBox.Show(this,
-            $"服务器提供了以下主机密钥：\n\n算法：{hostKey.Algorithm}\n指纹：{hostKey.Sha256Fingerprint}\n\n本技术验证版尚未保存指纹，因此每次连接都会确认。是否信任并继续？",
+        try
+        {
+            var result = _knownHostStore.Verify(options.Host, options.Port, hostKey);
+            return result.Status switch
+            {
+                KnownHostVerificationStatus.Trusted => true,
+                KnownHostVerificationStatus.Mismatch => ShowHostKeyMismatch(options, hostKey, result.ExpectedHost!),
+                KnownHostVerificationStatus.Unknown => ConfirmAndTrustHostKey(options, hostKey),
+                _ => false
+            };
+        }
+        catch (Exception exception) when (exception is IOException
+                                         or UnauthorizedAccessException
+                                         or JsonException
+                                         or InvalidDataException
+                                         or ArgumentException)
+        {
+            Dispatcher.Invoke(() => MessageBox.Show(this,
+                "无法读取或更新已知主机记录，已取消本次连接。\n\n请检查应用数据目录是否可访问。",
+                "主机身份验证失败", MessageBoxButton.OK, MessageBoxImage.Error));
+            return false;
+        }
+    }
+
+    private bool ConfirmAndTrustHostKey(SshConnectionOptions options, HostKeyInfo hostKey)
+    {
+        var isTrusted = Dispatcher.Invoke(() => MessageBox.Show(this,
+            $"地址：{options.Host}:{options.Port}\n算法：{hostKey.Algorithm}\n指纹：{hostKey.Sha256Fingerprint}\n\n这是首次连接此服务器。是否信任并保存其身份？",
             "确认服务器身份", MessageBoxButton.YesNo, MessageBoxImage.Warning, MessageBoxResult.No) == MessageBoxResult.Yes);
+
+        if (!isTrusted)
+        {
+            return false;
+        }
+
+        _knownHostStore.Trust(options.Host, options.Port, hostKey);
+        return true;
+    }
+
+    private bool ShowHostKeyMismatch(SshConnectionOptions options, HostKeyInfo hostKey, KnownHostEntry expectedHost)
+    {
+        Dispatcher.Invoke(() => MessageBox.Show(this,
+            $"地址：{options.Host}:{options.Port}\n\n已保存：\n算法：{expectedHost.Algorithm}\n指纹：{expectedHost.Sha256Fingerprint}\n\n本次连接：\n算法：{hostKey.Algorithm}\n指纹：{hostKey.Sha256Fingerprint}\n\n服务器身份已变化，为保护连接安全，已取消本次连接。",
+            "主机身份不匹配", MessageBoxButton.OK, MessageBoxImage.Error));
+        return false;
     }
 
     private void Terminal_WebMessageReceived(object? sender, CoreWebView2WebMessageReceivedEventArgs eventArgs)
