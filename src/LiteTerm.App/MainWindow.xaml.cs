@@ -1,10 +1,11 @@
-using System.Collections.Concurrent;
 using System.IO;
+using System.Text;
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Media;
 using System.Windows.Threading;
 using LiteTerm.Core.Connections;
+using LiteTerm.Core.Terminal;
 using LiteTerm.Infrastructure.Ssh;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Win32;
@@ -18,7 +19,9 @@ public partial class MainWindow : Window
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
         "LiteTerm",
         "known_hosts.json"));
-    private readonly ConcurrentQueue<byte[]> _outputQueue = new();
+    private const int OutputBufferCapacityBytes = 1024 * 1024;
+    private const int MaximumOutputBatchBytes = 64 * 1024;
+    private readonly BoundedTerminalOutputBuffer _outputBuffer = new(OutputBufferCapacityBytes);
     private readonly DispatcherTimer _outputTimer;
     private int _columns = 80;
     private int _rows = 24;
@@ -245,21 +248,35 @@ public partial class MainWindow : Window
 
     private void Session_OutputReceived(object? sender, TerminalOutputEventArgs eventArgs)
     {
-        _outputQueue.Enqueue(eventArgs.Data.ToArray());
+        _outputBuffer.Enqueue(eventArgs.Data.Span);
     }
 
     private void FlushOutput(object? sender, EventArgs eventArgs)
     {
-        if (!_terminalReady || TerminalWebView.CoreWebView2 is null || _outputQueue.IsEmpty) return;
+        if (!_terminalReady || TerminalWebView.CoreWebView2 is null) return;
 
-        using var buffer = new MemoryStream();
-        while (buffer.Length < 64 * 1024 && _outputQueue.TryDequeue(out var chunk)) buffer.Write(chunk);
-        if (buffer.Length == 0) return;
+        var batch = _outputBuffer.DequeueUpTo(MaximumOutputBatchBytes);
+        if (batch.IsEmpty && batch.DroppedBytes == 0) return;
+
+        var overloadNotice = batch.DroppedBytes == 0
+            ? null
+            : Encoding.UTF8.GetBytes($"\r\n[LiteTerm：终端输出过快，已丢弃 {batch.DroppedBytes:N0} 个较早字节。]\r\n");
+
+        var payloadLength = batch.Data.Length + (overloadNotice?.Length ?? 0);
+        var payload = new byte[payloadLength];
+        var offset = 0;
+        if (overloadNotice is not null)
+        {
+            Buffer.BlockCopy(overloadNotice, 0, payload, 0, overloadNotice.Length);
+            offset = overloadNotice.Length;
+        }
+
+        Buffer.BlockCopy(batch.Data, 0, payload, offset, batch.Data.Length);
 
         var message = JsonSerializer.Serialize(new
         {
             type = "output",
-            data = Convert.ToBase64String(buffer.ToArray())
+            data = Convert.ToBase64String(payload)
         });
         TerminalWebView.CoreWebView2.PostWebMessageAsJson(message);
     }

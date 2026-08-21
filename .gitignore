@@ -58,3 +58,9 @@ CodeCoverage/
 *.VisualState.xml
 TestResult.xml
 nunit-*.xml
+
+# Local agent planning records
+.planning/
+task_plan.md
+findings.md
+progress.md

@@ -9,7 +9,21 @@
   <link rel="stylesheet" href="terminal.css">
 </head>
 <body>
-  <div id="terminal" aria-label="SSH 终端"></div>
+  <div id="terminal-shell">
+    <div id="terminal" aria-label="SSH 终端"></div>
+    <section id="terminal-search" hidden aria-label="终端搜索">
+      <input id="terminal-search-input" type="search" placeholder="搜索终端输出" aria-label="搜索终端输出">
+      <button id="terminal-search-previous" type="button" title="上一个匹配">↑</button>
+      <button id="terminal-search-next" type="button" title="下一个匹配">↓</button>
+      <span id="terminal-search-status" aria-live="polite"></span>
+      <button id="terminal-search-close" type="button" title="关闭搜索">×</button>
+    </section>
+    <div id="terminal-menu" hidden role="menu" aria-label="终端菜单">
+      <button id="terminal-copy" type="button" role="menuitem">复制</button>
+      <button id="terminal-paste" type="button" role="menuitem">粘贴</button>
+      <button id="terminal-clear" type="button" role="menuitem">清屏</button>
+    </div>
+  </div>
   <script src="vendor/xterm.js"></script>
   <script src="vendor/xterm-addon-fit.js"></script>
   <script src="terminal.js"></script>

@@ -6,10 +6,13 @@ LiteTerm 是一款面向 Windows 的精简 SSH/SFTP 客户端。目前仓库已�
 
 - WPF 主窗口和连接栏
 - SSH 密码连接
-- 首次连接前显示并确认 SHA-256 主机指纹
+- SSH 私钥连接（支持选择私钥文件和可选口令）
+- 首次连接确认并持久化 SHA-256 主机指纹；后续不匹配时阻止连接
 - 本地打包的 xterm.js 终端页面，不加载远程网页
 - UTF-8 输入输出桥接
 - 终端尺寸自适应并同步远程 PTY
+- `Ctrl+F` 终端搜索、右键复制/粘贴/清屏菜单
+- 1 MiB 有界终端输出缓冲；输出过快时保留最新内容并提示已丢弃较早数据
 - 16ms 输出合并刷新，降低高速输出时的跨 WebView2 调用次数
 - 连接状态提示、手动断开和窗口关闭资源释放
 - SSH 连接参数基础校验测试
@@ -30,6 +33,15 @@ dotnet build LiteTerm.sln --no-restore
 dotnet test LiteTerm.sln --no-build --no-restore
 ```
 
+真实 SSH 集成测试仅在显式提供临时环境变量时运行，凭据不会写入仓库：
+
+```powershell
+$env:LITETERM_TEST_SSH_HOST = "测试主机"
+$env:LITETERM_TEST_SSH_USERNAME = "测试用户"
+$env:LITETERM_TEST_SSH_PASSWORD = "测试密码"
+dotnet test tests/LiteTerm.Tests/LiteTerm.Tests.csproj --filter "Category=Integration"
+```
+
 运行：
 
 ```powershell
@@ -47,9 +59,8 @@ tests/LiteTerm.Tests         核心逻辑测试
 
 ## 下一阶段
 
-1. 使用测试 Linux 主机验证 `vim`、`top`、`tail -F` 和中文宽字符。
-2. 增加私钥选择界面与已知主机指纹持久化。
-3. 引入 SQLite 服务器配置和 Windows DPAPI 凭据保护。
-4. 增加终端搜索、复制粘贴菜单和更严格的输出背压。
+1. 使用测试 Linux 主机通过 LiteTerm 实际验证连接、中文宽字符、`vim`、`top`、`tail -F`、搜索及复制粘贴。
+2. 验证连接超时、拒绝连接、远端断开和连续连接/释放行为。
+3. 引入 SQLite 服务器配置和 Windows DPAPI 凭据保护，并迁移已知主机记录。
 
 完整路线见 [LiteTerm_开发计划.md](LiteTerm_开发计划.md)。
