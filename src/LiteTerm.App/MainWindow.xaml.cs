@@ -23,6 +23,7 @@ public partial class MainWindow : Window
     private const int MaximumOutputBatchBytes = 64 * 1024;
     private readonly BoundedTerminalOutputBuffer _outputBuffer = new(OutputBufferCapacityBytes);
     private readonly DispatcherTimer _outputTimer;
+    private CancellationTokenSource? _connectionCancellation;
     private int _columns = 80;
     private int _rows = 24;
     private bool _terminalReady;
@@ -92,28 +93,59 @@ public partial class MainWindow : Window
                 : null
         };
 
+        var connectionCancellation = new CancellationTokenSource();
+        _connectionCancellation = connectionCancellation;
         try
         {
-            SetConnectionControls(false);
-            await _session.ConnectAsync(options, hostKey => VerifyHostKey(options, hostKey), _columns, _rows);
+            SetConnectionControls(false, true, "取消连接");
+            await _session.ConnectAsync(
+                options,
+                hostKey => VerifyHostKey(options, hostKey),
+                _columns,
+                _rows,
+                connectionCancellation.Token);
             TerminalWebView.Focus();
         }
-        catch (Exception exception)
+        catch (OperationCanceledException) when (connectionCancellation.IsCancellationRequested)
+        {
+            SetStatus("已取消连接", "#9CA3AF");
+            SetConnectionControls(true);
+        }
+        catch (Exception)
         {
             SetConnectionControls(true);
-            MessageBox.Show(this, exception.Message, "连接失败", MessageBoxButton.OK, MessageBoxImage.Error);
+            MessageBox.Show(this,
+                "无法建立 SSH 连接。请检查主机、端口、网络状态和认证信息后重试。",
+                "连接失败", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+        finally
+        {
+            if (ReferenceEquals(_connectionCancellation, connectionCancellation))
+            {
+                _connectionCancellation = null;
+            }
+
+            connectionCancellation.Dispose();
         }
     }
 
     private async void Disconnect_Click(object sender, RoutedEventArgs e)
     {
+        if (_session.State == ConnectionState.Connecting)
+        {
+            CancelConnectionAttempt();
+            SetStatus("正在取消连接…", "#F59E0B");
+            SetConnectionControls(false);
+            return;
+        }
+
         try
         {
             await _session.DisconnectAsync();
         }
-        catch (Exception exception)
+        catch (Exception)
         {
-            MessageBox.Show(this, exception.Message, "断开失败", MessageBoxButton.OK, MessageBoxImage.Error);
+            MessageBox.Show(this, "断开会话时发生错误。", "断开失败", MessageBoxButton.OK, MessageBoxImage.Error);
         }
     }
 
@@ -232,9 +264,9 @@ public partial class MainWindow : Window
         {
             await _session.SendAsync(input);
         }
-        catch (Exception exception)
+        catch (Exception)
         {
-            await Dispatcher.InvokeAsync(() => SetStatus($"发送失败：{exception.Message}", "#EF4444"));
+            await Dispatcher.InvokeAsync(() => SetStatus("终端输入发送失败，连接可能已中断。", "#EF4444"));
         }
     }
 
@@ -289,7 +321,7 @@ public partial class MainWindow : Window
             {
                 case ConnectionState.Connecting:
                     SetStatus("正在连接…", "#F59E0B");
-                    SetConnectionControls(false);
+                    SetConnectionControls(false, true, "取消连接");
                     break;
                 case ConnectionState.Connected:
                     SetStatus("已连接", "#22C55E");
@@ -297,6 +329,7 @@ public partial class MainWindow : Window
                     break;
                 case ConnectionState.Disconnecting:
                     SetStatus("正在断开…", "#F59E0B");
+                    SetConnectionControls(false);
                     break;
                 case ConnectionState.Disconnected:
                     SetStatus("已断开", "#9CA3AF");
@@ -310,10 +343,11 @@ public partial class MainWindow : Window
         });
     }
 
-    private void SetConnectionControls(bool canConnect, bool canDisconnect = false)
+    private void SetConnectionControls(bool canConnect, bool canDisconnect = false, string disconnectButtonText = "断开")
     {
         ConnectButton.IsEnabled = canConnect;
         DisconnectButton.IsEnabled = canDisconnect;
+        DisconnectButton.Content = disconnectButtonText;
         HostTextBox.IsEnabled = canConnect;
         PortTextBox.IsEnabled = canConnect;
         UsernameTextBox.IsEnabled = canConnect;
@@ -339,8 +373,21 @@ public partial class MainWindow : Window
         StatusDot.Fill = (Brush)new BrushConverter().ConvertFromString(color)!;
     }
 
+    private void CancelConnectionAttempt()
+    {
+        try
+        {
+            _connectionCancellation?.Cancel();
+        }
+        catch (ObjectDisposedException)
+        {
+            // The completed connection attempt has already released its cancellation source.
+        }
+    }
+
     private async void MainWindow_Closed(object? sender, EventArgs e)
     {
+        CancelConnectionAttempt();
         _outputTimer.Stop();
         _session.OutputReceived -= Session_OutputReceived;
         _session.StateChanged -= Session_StateChanged;

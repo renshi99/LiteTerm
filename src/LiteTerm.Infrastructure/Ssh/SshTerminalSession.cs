@@ -46,6 +46,8 @@ public sealed class SshTerminalSession : ISshTerminalSession
                 KeepAliveInterval = options.KeepAliveInterval
             };
 
+            client.ErrorOccurred += OnClientErrorOccurred;
+
             client.HostKeyReceived += (_, eventArgs) =>
             {
                 var fingerprint = Convert.ToBase64String(SHA256.HashData(eventArgs.HostKey));
@@ -55,7 +57,10 @@ public sealed class SshTerminalSession : ISshTerminalSession
             };
 
             _client = client;
-            await Task.Run(client.Connect, cancellationToken).ConfigureAwait(false);
+            using var cancellationRegistration = cancellationToken.Register(
+                static state => CancelConnectingClient((SshClient)state!),
+                client);
+            await Task.Run(client.Connect, CancellationToken.None).ConfigureAwait(false);
             cancellationToken.ThrowIfCancellationRequested();
 
             var shell = client.CreateShellStream(
@@ -69,6 +74,12 @@ public sealed class SshTerminalSession : ISshTerminalSession
             _shell = shell;
 
             SetState(ConnectionState.Connected);
+        }
+        catch when (cancellationToken.IsCancellationRequested)
+        {
+            DisposeConnection();
+            SetState(ConnectionState.Disconnected);
+            throw new OperationCanceledException(cancellationToken);
         }
         catch
         {
@@ -91,9 +102,21 @@ public sealed class SshTerminalSession : ISshTerminalSession
             return;
         }
 
-        var bytes = Encoding.UTF8.GetBytes(data);
-        await shell.WriteAsync(bytes.AsMemory(), cancellationToken).ConfigureAwait(false);
-        await shell.FlushAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var bytes = Encoding.UTF8.GetBytes(data);
+            await shell.WriteAsync(bytes.AsMemory(), cancellationToken).ConfigureAwait(false);
+            await shell.FlushAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            await TransitionToFailedAsync().ConfigureAwait(false);
+            throw;
+        }
     }
 
     public void Resize(int columns, int rows)
@@ -103,7 +126,14 @@ public sealed class SshTerminalSession : ISshTerminalSession
             return;
         }
 
-        _shell.ChangeWindowSize((uint)columns, (uint)rows, 0, 0);
+        try
+        {
+            _shell.ChangeWindowSize((uint)columns, (uint)rows, 0, 0);
+        }
+        catch
+        {
+            _ = TransitionToFailedAsync();
+        }
     }
 
     public async Task DisconnectAsync(CancellationToken cancellationToken = default)
@@ -164,9 +194,59 @@ public sealed class SshTerminalSession : ISshTerminalSession
             : new PrivateKeyFile(options.PrivateKeyPath!, options.PrivateKeyPassphrase);
     }
 
+    private static void CancelConnectingClient(SshClient client)
+    {
+        // Dispose closes the underlying transport when Connect is still synchronously waiting on the network.
+        try
+        {
+            client.Dispose();
+        }
+        catch
+        {
+            // Cancellation is best effort; ConnectAsync performs the remaining cleanup path.
+        }
+    }
+
     private void OnShellDataReceived(object? sender, ShellDataEventArgs eventArgs)
     {
         OutputReceived?.Invoke(this, new TerminalOutputEventArgs(eventArgs.Data));
+    }
+
+    private void OnClientErrorOccurred(object? sender, ExceptionEventArgs eventArgs)
+    {
+        _ = TransitionToFailedAsync();
+    }
+
+    private async Task TransitionToFailedAsync()
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        try
+        {
+            await _lifecycleLock.WaitAsync().ConfigureAwait(false);
+        }
+        catch (ObjectDisposedException)
+        {
+            return;
+        }
+
+        try
+        {
+            if (State != ConnectionState.Connected)
+            {
+                return;
+            }
+
+            DisposeConnection();
+            SetState(ConnectionState.Failed);
+        }
+        finally
+        {
+            _lifecycleLock.Release();
+        }
     }
 
     private void SetState(ConnectionState state)
@@ -177,22 +257,42 @@ public sealed class SshTerminalSession : ISshTerminalSession
 
     private void DisposeConnection()
     {
-        if (_shell is not null)
+        var shell = _shell;
+        _shell = null;
+        if (shell is not null)
         {
-            _shell.DataReceived -= OnShellDataReceived;
-            _shell.Dispose();
-            _shell = null;
+            shell.DataReceived -= OnShellDataReceived;
+            try
+            {
+                shell.Dispose();
+            }
+            catch
+            {
+                // A failed connection can leave the stream partially closed; continue releasing its client.
+            }
         }
 
-        if (_client is not null)
+        var client = _client;
+        _client = null;
+        if (client is not null)
         {
-            if (_client.IsConnected)
-            {
-                _client.Disconnect();
-            }
+            client.ErrorOccurred -= OnClientErrorOccurred;
 
-            _client.Dispose();
-            _client = null;
+            try
+            {
+                if (client.IsConnected)
+                {
+                    client.Disconnect();
+                }
+            }
+            catch
+            {
+                // The transport is already unusable; disposing still releases managed resources.
+            }
+            finally
+            {
+                client.Dispose();
+            }
         }
     }
 }
