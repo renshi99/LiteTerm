@@ -22,6 +22,57 @@ public sealed record ServerProfile(
     DateTimeOffset UpdatedAt,
     DateTimeOffset? LastConnectedAt)
 {
+    /// <summary>
+    /// 判断服务器资料是否匹配名称、分组、地址或用户名中的全部搜索词。
+    /// </summary>
+    public bool MatchesSearch(string? searchText)
+    {
+        if (string.IsNullOrWhiteSpace(searchText))
+        {
+            return true;
+        }
+
+        var searchableFields = new[] { Name, GroupName, Host, Username };
+        return searchText
+            .Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .All(term => searchableFields.Any(field =>
+                field?.Contains(term, StringComparison.OrdinalIgnoreCase) == true));
+    }
+
+    public static string ResolveName(string? name, string username, string host)
+    {
+        return string.IsNullOrWhiteSpace(name)
+            ? $"{username.Trim()}@{host.Trim()}"
+            : name.Trim();
+    }
+
+    public static string ResolveAvailableName(
+        string baseName,
+        IEnumerable<string> existingNames,
+        bool appendSuffix)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(baseName);
+        ArgumentNullException.ThrowIfNull(existingNames);
+
+        var normalizedBaseName = baseName.Trim();
+        var names = existingNames
+            .Select(existingName => existingName.Trim())
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (!appendSuffix && !names.Contains(normalizedBaseName))
+        {
+            return normalizedBaseName;
+        }
+
+        for (var suffix = 2; ; suffix++)
+        {
+            var candidate = $"{normalizedBaseName} ({suffix})";
+            if (!names.Contains(candidate))
+            {
+                return candidate;
+            }
+        }
+    }
+
     public void Validate()
     {
         if (Id == Guid.Empty)

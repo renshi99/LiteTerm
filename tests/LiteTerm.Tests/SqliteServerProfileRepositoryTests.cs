@@ -53,6 +53,43 @@ public sealed class SqliteServerProfileRepositoryTests : IDisposable
     }
 
     [Fact]
+    public async Task SaveWithCredentialAsync_CreatesAndUpdatesProfileAndCredentialTogether()
+    {
+        var databasePath = Path.Combine(_directory, "liteterm.db");
+        var repository = new SqliteServerProfileRepository(databasePath, new TestSecretProtector());
+        var profile = CreateProfile();
+
+        await repository.SaveWithCredentialAsync(profile, new ServerCredential(profile.Id, "initial-password", null));
+
+        var updatedProfile = profile with
+        {
+            Name = "更新后的服务器",
+            AuthenticationType = SshAuthenticationType.PrivateKey,
+            PrivateKeyPath = "C:\\Keys\\replacement_ed25519",
+            UpdatedAt = profile.UpdatedAt.AddMinutes(1)
+        };
+        var updatedCredential = new ServerCredential(profile.Id, null, "replacement-passphrase");
+        await repository.SaveWithCredentialAsync(updatedProfile, updatedCredential);
+
+        Assert.Equal(updatedProfile, await repository.GetByIdAsync(profile.Id));
+        Assert.Equal(updatedCredential, await repository.GetCredentialAsync(profile.Id));
+    }
+
+    [Fact]
+    public async Task SaveWithCredentialAsync_RejectsCredentialForAnotherServerBeforeWriting()
+    {
+        var databasePath = Path.Combine(_directory, "liteterm.db");
+        var repository = new SqliteServerProfileRepository(databasePath, new TestSecretProtector());
+        var profile = CreateProfile();
+
+        await Assert.ThrowsAsync<ArgumentException>(() => repository.SaveWithCredentialAsync(
+            profile,
+            new ServerCredential(Guid.NewGuid(), "password", null)));
+
+        Assert.Null(await repository.GetByIdAsync(profile.Id));
+    }
+
+    [Fact]
     public async Task KnownHosts_ArePersistedAndMismatchesAreRejectedAcrossRepositoryInstances()
     {
         var databasePath = Path.Combine(_directory, "liteterm.db");

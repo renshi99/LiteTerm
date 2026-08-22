@@ -10,6 +10,11 @@ public interface IServerProfileRepository
 
     Task SaveAsync(ServerProfile profile, CancellationToken cancellationToken = default);
 
+    Task SaveWithCredentialAsync(
+        ServerProfile profile,
+        ServerCredential credential,
+        CancellationToken cancellationToken = default);
+
     Task DeleteAsync(Guid id, CancellationToken cancellationToken = default);
 
     Task<ServerCredential?> GetCredentialAsync(Guid serverId, CancellationToken cancellationToken = default);

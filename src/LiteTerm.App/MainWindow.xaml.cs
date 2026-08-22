@@ -1,7 +1,10 @@
+using System.Collections.ObjectModel;
+using System.ComponentModel;
 using System.IO;
 using System.Text;
 using System.Text.Json;
 using System.Windows;
+using System.Windows.Data;
 using System.Windows.Media;
 using System.Windows.Threading;
 using LiteTerm.Core.Connections;
@@ -23,6 +26,8 @@ public partial class MainWindow : Window
     private const int MaximumOutputBatchBytes = 64 * 1024;
     private readonly BoundedTerminalOutputBuffer _outputBuffer = new(OutputBufferCapacityBytes);
     private readonly DispatcherTimer _outputTimer;
+    private readonly ObservableCollection<ServerProfile> _serverProfiles = [];
+    private readonly ICollectionView _serverProfilesView;
     private CancellationTokenSource? _connectionCancellation;
     private int _columns = 80;
     private int _rows = 24;
@@ -45,6 +50,12 @@ public partial class MainWindow : Window
         _terminalAppearanceStore = terminalAppearanceStore;
 
         InitializeComponent();
+        _serverProfilesView = CollectionViewSource.GetDefaultView(_serverProfiles);
+        _serverProfilesView.Filter = item =>
+            item is ServerProfile profile && profile.MatchesSearch(ServerSearchTextBox.Text);
+        _serverProfilesView.GroupDescriptions.Add(
+            new PropertyGroupDescription(nameof(ServerProfile.GroupName), new ServerGroupNameConverter()));
+        ServerList.ItemsSource = _serverProfilesView;
         _session.OutputReceived += Session_OutputReceived;
         _session.StateChanged += Session_StateChanged;
         Loaded += MainWindow_Loaded;
@@ -60,6 +71,7 @@ public partial class MainWindow : Window
         {
             await _dataStore.InitializeAsync();
             _terminalAppearance = await _terminalAppearanceStore.GetTerminalAppearanceAsync();
+            await RefreshServerProfilesAsync();
             UpdateTerminalHostBackground();
         }
         catch (Exception)
@@ -94,12 +106,6 @@ public partial class MainWindow : Window
 
     private async void Connect_Click(object sender, RoutedEventArgs e)
     {
-        if (!_terminalReady)
-        {
-            MessageBox.Show(this, "终端仍在初始化，请稍后再试。", "LiteTerm", MessageBoxButton.OK, MessageBoxImage.Information);
-            return;
-        }
-
         if (!int.TryParse(PortTextBox.Text, out var port))
         {
             MessageBox.Show(this, "端口必须是数字。", "LiteTerm", MessageBoxButton.OK, MessageBoxImage.Warning);
@@ -122,7 +128,39 @@ public partial class MainWindow : Window
                 : null
         };
 
+        ServerProfile? profileToSave = null;
+        ServerCredential? credentialToSave = null;
+        if (SaveConnectionCheckBox.IsChecked == true)
+        {
+            profileToSave = CreateQuickConnectionProfile(options);
+            credentialToSave = new ServerCredential(
+                profileToSave.Id,
+                authenticationType == SshAuthenticationType.Password ? options.Password : null,
+                authenticationType == SshAuthenticationType.PrivateKey ? options.PrivateKeyPassphrase : null);
+        }
+
+        await ConnectAsync(options, profileToSave, credentialToSave);
+    }
+
+    private async Task ConnectAsync(
+        SshConnectionOptions options,
+        ServerProfile? savedProfile = null,
+        ServerCredential? credentialToSave = null)
+    {
+        if (!_terminalReady)
+        {
+            MessageBox.Show(this, "终端仍在初始化，请稍后再试。", "LiteTerm", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        if (_session.State is ConnectionState.Connecting or ConnectionState.Connected or ConnectionState.Disconnecting)
+        {
+            MessageBox.Show(this, "请先断开当前会话。", "LiteTerm", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
         var connectionCancellation = new CancellationTokenSource();
+        var connected = false;
         _connectionCancellation = connectionCancellation;
         try
         {
@@ -134,6 +172,7 @@ public partial class MainWindow : Window
                 _rows,
                 connectionCancellation.Token);
             TerminalWebView.Focus();
+            connected = true;
         }
         catch (OperationCanceledException) when (connectionCancellation.IsCancellationRequested)
         {
@@ -155,6 +194,34 @@ public partial class MainWindow : Window
             }
 
             connectionCancellation.Dispose();
+        }
+
+        if (connected && savedProfile is not null)
+        {
+            try
+            {
+                var connectedProfile = savedProfile with { LastConnectedAt = DateTimeOffset.UtcNow };
+                if (credentialToSave is null)
+                {
+                    await _dataStore.SaveAsync(connectedProfile);
+                }
+                else
+                {
+                    await _dataStore.SaveWithCredentialAsync(
+                        connectedProfile,
+                        credentialToSave with { ServerId = connectedProfile.Id });
+                }
+
+                await RefreshServerProfilesAsync(connectedProfile.Id);
+            }
+            catch (Exception)
+            {
+                var message = credentialToSave is null
+                    ? "连接已建立，但无法更新最近连接时间。"
+                    : "连接已建立，但无法保存至本地连接。";
+                MessageBox.Show(this, message,
+                    "服务器管理", MessageBoxButton.OK, MessageBoxImage.Warning);
+            }
         }
     }
 
@@ -322,6 +389,229 @@ public partial class MainWindow : Window
         }
     }
 
+    private async void NewServer_Click(object sender, RoutedEventArgs e)
+    {
+        var dialog = new ServerProfileWindow { Owner = this };
+        if (dialog.ShowDialog() == true)
+        {
+            await SaveServerDialogAsync(dialog);
+        }
+    }
+
+    private async void EditServer_Click(object sender, RoutedEventArgs e)
+    {
+        if (ServerList.SelectedItem is not ServerProfile profile)
+        {
+            ShowSelectServerMessage();
+            return;
+        }
+
+        try
+        {
+            var credential = await _dataStore.GetCredentialAsync(profile.Id);
+            var dialog = new ServerProfileWindow(profile, credential) { Owner = this };
+            if (dialog.ShowDialog() == true)
+            {
+                await SaveServerDialogAsync(dialog);
+            }
+        }
+        catch (Exception)
+        {
+            MessageBox.Show(this, "无法读取服务器资料或凭据。", "服务器管理", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
+    private async void DeleteServer_Click(object sender, RoutedEventArgs e)
+    {
+        if (ServerList.SelectedItem is not ServerProfile profile)
+        {
+            ShowSelectServerMessage();
+            return;
+        }
+
+        if (MessageBox.Show(this,
+                $"确定删除服务器“{profile.Name}”吗？保存的凭据也会一并删除。",
+                "删除服务器", MessageBoxButton.YesNo, MessageBoxImage.Warning, MessageBoxResult.No) != MessageBoxResult.Yes)
+        {
+            return;
+        }
+
+        try
+        {
+            await _dataStore.DeleteAsync(profile.Id);
+            await RefreshServerProfilesAsync();
+        }
+        catch (Exception)
+        {
+            MessageBox.Show(this, "无法删除服务器资料。", "服务器管理", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
+    private async void ConnectSavedServer_Click(object sender, RoutedEventArgs e)
+    {
+        await ConnectSelectedServerAsync();
+    }
+
+    private void ServerSearchTextBox_TextChanged(object sender, System.Windows.Controls.TextChangedEventArgs e)
+    {
+        if (_serverProfilesView is null)
+        {
+            return;
+        }
+
+        _serverProfilesView.Refresh();
+        UpdateServerCount();
+    }
+
+    private async void ServerList_MouseDoubleClick(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        if (e.OriginalSource is not DependencyObject source
+            || System.Windows.Controls.ItemsControl.ContainerFromElement(ServerList, source) is not System.Windows.Controls.ListBoxItem)
+        {
+            return;
+        }
+
+        await ConnectSelectedServerAsync();
+    }
+
+    private async Task ConnectSelectedServerAsync()
+    {
+        if (ServerList.SelectedItem is not ServerProfile profile)
+        {
+            ShowSelectServerMessage();
+            return;
+        }
+
+        try
+        {
+            var credential = await _dataStore.GetCredentialAsync(profile.Id);
+            if (profile.AuthenticationType == SshAuthenticationType.Password && credential?.Password is null)
+            {
+                MessageBox.Show(this, "此服务器没有已保存的密码，请编辑服务器资料后再连接。",
+                    "快速连接", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            var options = new SshConnectionOptions
+            {
+                Host = profile.Host,
+                Port = profile.Port,
+                Username = profile.Username,
+                AuthenticationType = profile.AuthenticationType,
+                Password = profile.AuthenticationType == SshAuthenticationType.Password ? credential?.Password : null,
+                PrivateKeyPath = profile.AuthenticationType == SshAuthenticationType.PrivateKey ? profile.PrivateKeyPath : null,
+                PrivateKeyPassphrase = profile.AuthenticationType == SshAuthenticationType.PrivateKey
+                    ? credential?.PrivateKeyPassphrase
+                    : null,
+                ConnectTimeout = profile.ConnectTimeout,
+                KeepAliveInterval = profile.KeepAliveInterval
+            };
+
+            PopulateConnectionForm(profile, credential);
+            await ConnectAsync(options, profile);
+        }
+        catch (Exception)
+        {
+            MessageBox.Show(this, "无法读取服务器资料或受保护的凭据。", "快速连接", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
+    private async Task SaveServerDialogAsync(ServerProfileWindow dialog)
+    {
+        if (dialog.Profile is null || dialog.Credential is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await _dataStore.SaveWithCredentialAsync(dialog.Profile, dialog.Credential);
+            await RefreshServerProfilesAsync(dialog.Profile.Id);
+        }
+        catch (Exception)
+        {
+            MessageBox.Show(this,
+                "无法保存服务器资料和凭据，请检查本地数据目录后重试。",
+                "服务器管理", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
+    private async Task RefreshServerProfilesAsync(Guid? selectedId = null)
+    {
+        var profiles = await _dataStore.GetAllAsync();
+        _serverProfiles.Clear();
+        foreach (var profile in profiles)
+        {
+            _serverProfiles.Add(profile);
+        }
+
+        UpdateServerCount();
+
+        if (selectedId is not null)
+        {
+            ServerList.SelectedItem = _serverProfiles.FirstOrDefault(profile => profile.Id == selectedId);
+            if (ServerList.SelectedItem is not null)
+            {
+                ServerList.ScrollIntoView(ServerList.SelectedItem);
+            }
+        }
+    }
+
+    private void UpdateServerCount()
+    {
+        var visibleCount = _serverProfilesView.Cast<object>().Count();
+        ServerCountText.Text = string.IsNullOrWhiteSpace(ServerSearchTextBox.Text)
+            ? $"{visibleCount} 台"
+            : $"{visibleCount}/{_serverProfiles.Count} 台";
+    }
+
+    private ServerProfile CreateQuickConnectionProfile(SshConnectionOptions options)
+    {
+        var duplicateEndpointExists = _serverProfiles.Any(profile =>
+            profile.Port == options.Port
+            && string.Equals(profile.Host, options.Host, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(profile.Username, options.Username, StringComparison.OrdinalIgnoreCase));
+        var baseName = ServerProfile.ResolveName(null, options.Username, options.Host);
+        var profileName = ServerProfile.ResolveAvailableName(
+            baseName,
+            _serverProfiles.Select(profile => profile.Name),
+            duplicateEndpointExists);
+        var now = DateTimeOffset.UtcNow;
+
+        return new ServerProfile(
+            Guid.NewGuid(),
+            profileName,
+            null,
+            options.Host.Trim(),
+            options.Port,
+            options.Username.Trim(),
+            options.AuthenticationType,
+            options.AuthenticationType == SshAuthenticationType.PrivateKey ? options.PrivateKeyPath : null,
+            null,
+            options.ConnectTimeout,
+            options.KeepAliveInterval,
+            null,
+            now,
+            now,
+            null);
+    }
+
+    private void PopulateConnectionForm(ServerProfile profile, ServerCredential? credential)
+    {
+        HostTextBox.Text = profile.Host;
+        PortTextBox.Text = profile.Port.ToString();
+        UsernameTextBox.Text = profile.Username;
+        AuthenticationComboBox.SelectedIndex = profile.AuthenticationType == SshAuthenticationType.PrivateKey ? 1 : 0;
+        PasswordInput.Password = credential?.Password ?? string.Empty;
+        PrivateKeyPathTextBox.Text = profile.PrivateKeyPath ?? string.Empty;
+        PrivateKeyPassphraseInput.Password = credential?.PrivateKeyPassphrase ?? string.Empty;
+    }
+
+    private void ShowSelectServerMessage()
+    {
+        MessageBox.Show(this, "请先在左侧选择一台服务器。", "服务器管理", MessageBoxButton.OK, MessageBoxImage.Information);
+    }
+
     private void ApplyTerminalAppearance()
     {
         if (!_terminalReady || TerminalWebView.CoreWebView2 is null)
@@ -429,6 +719,7 @@ public partial class MainWindow : Window
         PrivateKeyPathTextBox.IsEnabled = canConnect;
         BrowsePrivateKeyButton.IsEnabled = canConnect;
         PrivateKeyPassphraseInput.IsEnabled = canConnect;
+        SaveConnectionCheckBox.IsEnabled = canConnect;
     }
 
     private SshAuthenticationType GetSelectedAuthenticationType()

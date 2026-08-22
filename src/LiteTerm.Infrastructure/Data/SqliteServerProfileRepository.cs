@@ -19,6 +19,37 @@ public sealed class SqliteServerProfileRepository :
 {
     private const int CurrentSchemaVersion = 3;
     private const string TerminalAppearanceSettingKey = "terminal.appearance";
+    private const string UpsertProfileSql = """
+        INSERT INTO server_profile (
+            id, name, group_name, host, port, username, auth_type, private_key_path,
+            default_remote_path, connect_timeout_ms, keep_alive_interval_ms, remark,
+            created_at_utc, updated_at_utc, last_connected_at_utc)
+        VALUES (
+            $id, $name, $groupName, $host, $port, $username, $authenticationType, $privateKeyPath,
+            $defaultRemotePath, $connectTimeoutMilliseconds, $keepAliveIntervalMilliseconds, $remark,
+            $createdAt, $updatedAt, $lastConnectedAt)
+        ON CONFLICT(id) DO UPDATE SET
+            name = excluded.name,
+            group_name = excluded.group_name,
+            host = excluded.host,
+            port = excluded.port,
+            username = excluded.username,
+            auth_type = excluded.auth_type,
+            private_key_path = excluded.private_key_path,
+            default_remote_path = excluded.default_remote_path,
+            connect_timeout_ms = excluded.connect_timeout_ms,
+            keep_alive_interval_ms = excluded.keep_alive_interval_ms,
+            remark = excluded.remark,
+            updated_at_utc = excluded.updated_at_utc,
+            last_connected_at_utc = excluded.last_connected_at_utc;
+        """;
+    private const string UpsertCredentialSql = """
+        INSERT INTO server_credential (server_id, password_cipher, private_key_passphrase_cipher)
+        VALUES ($serverId, $passwordCipher, $privateKeyPassphraseCipher)
+        ON CONFLICT(server_id) DO UPDATE SET
+            password_cipher = excluded.password_cipher,
+            private_key_passphrase_cipher = excluded.private_key_passphrase_cipher;
+        """;
 
     private readonly string _databasePath;
     private readonly string _connectionString;
@@ -125,32 +156,46 @@ public sealed class SqliteServerProfileRepository :
         await InitializeAsync(cancellationToken).ConfigureAwait(false);
         await using var connection = await OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
-        command.CommandText = """
-            INSERT INTO server_profile (
-                id, name, group_name, host, port, username, auth_type, private_key_path,
-                default_remote_path, connect_timeout_ms, keep_alive_interval_ms, remark,
-                created_at_utc, updated_at_utc, last_connected_at_utc)
-            VALUES (
-                $id, $name, $groupName, $host, $port, $username, $authenticationType, $privateKeyPath,
-                $defaultRemotePath, $connectTimeoutMilliseconds, $keepAliveIntervalMilliseconds, $remark,
-                $createdAt, $updatedAt, $lastConnectedAt)
-            ON CONFLICT(id) DO UPDATE SET
-                name = excluded.name,
-                group_name = excluded.group_name,
-                host = excluded.host,
-                port = excluded.port,
-                username = excluded.username,
-                auth_type = excluded.auth_type,
-                private_key_path = excluded.private_key_path,
-                default_remote_path = excluded.default_remote_path,
-                connect_timeout_ms = excluded.connect_timeout_ms,
-                keep_alive_interval_ms = excluded.keep_alive_interval_ms,
-                remark = excluded.remark,
-                updated_at_utc = excluded.updated_at_utc,
-                last_connected_at_utc = excluded.last_connected_at_utc;
-            """;
+        command.CommandText = UpsertProfileSql;
         AddProfileParameters(command, profile);
         await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task SaveWithCredentialAsync(
+        ServerProfile profile,
+        ServerCredential credential,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(profile);
+        ArgumentNullException.ThrowIfNull(credential);
+        profile.Validate();
+        credential.Validate();
+        if (credential.ServerId != profile.Id)
+        {
+            throw new ArgumentException("凭据必须属于同一服务器资料。", nameof(credential));
+        }
+
+        await InitializeAsync(cancellationToken).ConfigureAwait(false);
+        await using var connection = await OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+
+        await using (var profileCommand = connection.CreateCommand())
+        {
+            profileCommand.Transaction = (SqliteTransaction)transaction;
+            profileCommand.CommandText = UpsertProfileSql;
+            AddProfileParameters(profileCommand, profile);
+            await profileCommand.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        await using (var credentialCommand = connection.CreateCommand())
+        {
+            credentialCommand.Transaction = (SqliteTransaction)transaction;
+            credentialCommand.CommandText = UpsertCredentialSql;
+            AddCredentialParameters(credentialCommand, credential);
+            await credentialCommand.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
     }
 
     public async Task DeleteAsync(Guid id, CancellationToken cancellationToken = default)
@@ -197,16 +242,8 @@ public sealed class SqliteServerProfileRepository :
         await InitializeAsync(cancellationToken).ConfigureAwait(false);
         await using var connection = await OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
-        command.CommandText = """
-            INSERT INTO server_credential (server_id, password_cipher, private_key_passphrase_cipher)
-            VALUES ($serverId, $passwordCipher, $privateKeyPassphraseCipher)
-            ON CONFLICT(server_id) DO UPDATE SET
-                password_cipher = excluded.password_cipher,
-                private_key_passphrase_cipher = excluded.private_key_passphrase_cipher;
-            """;
-        command.Parameters.AddWithValue("$serverId", credential.ServerId.ToString("D"));
-        command.Parameters.AddWithValue("$passwordCipher", ProtectOrDbNull(credential.Password));
-        command.Parameters.AddWithValue("$privateKeyPassphraseCipher", ProtectOrDbNull(credential.PrivateKeyPassphrase));
+        command.CommandText = UpsertCredentialSql;
+        AddCredentialParameters(command, credential);
         await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
@@ -507,6 +544,13 @@ public sealed class SqliteServerProfileRepository :
         command.Parameters.AddWithValue("$lastConnectedAt", profile.LastConnectedAt is { } lastConnectedAt
             ? ToStorageValue(lastConnectedAt)
             : DBNull.Value);
+    }
+
+    private void AddCredentialParameters(SqliteCommand command, ServerCredential credential)
+    {
+        command.Parameters.AddWithValue("$serverId", credential.ServerId.ToString("D"));
+        command.Parameters.AddWithValue("$passwordCipher", ProtectOrDbNull(credential.Password));
+        command.Parameters.AddWithValue("$privateKeyPassphraseCipher", ProtectOrDbNull(credential.PrivateKeyPassphrase));
     }
 
     private static void AddKnownHostParameters(
