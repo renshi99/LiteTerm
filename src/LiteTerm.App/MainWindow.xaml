@@ -43,6 +43,7 @@
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
                     <RowDefinition Height="*" />
                     <RowDefinition Height="Auto" />
                 </Grid.RowDefinitions>
@@ -60,7 +61,16 @@
                     <TextBlock x:Name="ServerCountText" Grid.Column="1" Foreground="#9CA3AF" FontSize="11"
                                VerticalAlignment="Center" Margin="8,0,2,0" />
                 </Grid>
-                <ListBox x:Name="ServerList" Grid.Row="2" Background="#0F172A" Foreground="#E5E7EB"
+                <DockPanel Grid.Row="2" Margin="0,0,0,8">
+                    <TextBlock Text="排序" Foreground="#9CA3AF" FontSize="11" VerticalAlignment="Center"
+                               Margin="2,0,8,0" />
+                    <ComboBox x:Name="ServerSortComboBox" Height="28" SelectedIndex="0"
+                              SelectionChanged="ServerSortComboBox_SelectionChanged">
+                        <ComboBoxItem Content="按名称" Tag="Name" />
+                        <ComboBoxItem Content="组内按最近连接" Tag="Recent" />
+                    </ComboBox>
+                </DockPanel>
+                <ListBox x:Name="ServerList" Grid.Row="3" Background="#0F172A" Foreground="#E5E7EB"
                          BorderBrush="#374151" MouseDoubleClick="ServerList_MouseDoubleClick">
                     <ListBox.GroupStyle>
                         <GroupStyle>
@@ -87,12 +97,13 @@
                         </DataTemplate>
                     </ListBox.ItemTemplate>
                 </ListBox>
-                <WrapPanel Grid.Row="3" Margin="0,10,0,0">
-                    <Button Content="新增" Padding="10,4" Click="NewServer_Click" />
-                    <Button Content="编辑" Padding="10,4" Click="EditServer_Click" />
-                    <Button Content="删除" Padding="10,4" Click="DeleteServer_Click" />
-                    <Button Content="连接" Padding="10,4" Margin="0" Click="ConnectSavedServer_Click" />
-                </WrapPanel>
+                <UniformGrid Grid.Row="4" Columns="5" Margin="0,10,0,0">
+                    <Button Content="新增" Padding="5,4" Margin="0,0,4,0" Click="NewServer_Click" />
+                    <Button Content="编辑" Padding="5,4" Margin="0,0,4,0" Click="EditServer_Click" />
+                    <Button Content="复制" Padding="5,4" Margin="0,0,4,0" Click="CopyServer_Click" />
+                    <Button Content="删除" Padding="5,4" Margin="0,0,4,0" Click="DeleteServer_Click" />
+                    <Button Content="连接" Padding="5,4" Margin="0" Click="ConnectSavedServer_Click" />
+                </UniformGrid>
             </Grid>
         </Border>
 

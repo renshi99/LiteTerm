@@ -71,4 +71,45 @@ public sealed class ServerProfileTests
             expected,
             ServerProfile.ResolveAvailableName("deploy@host", existingNames, appendSuffix));
     }
+
+    [Fact]
+    public void CreateCopy_CopiesConnectionFieldsButResetsIdentityAndConnectionHistory()
+    {
+        var newId = Guid.NewGuid();
+        var createdAt = DateTimeOffset.UtcNow.AddMinutes(1);
+        var source = SearchProfile with { LastConnectedAt = DateTimeOffset.UtcNow };
+
+        var copy = source.CreateCopy(newId, [source.Name], createdAt);
+
+        Assert.Equal(newId, copy.Id);
+        Assert.Equal("生产 Web - 副本", copy.Name);
+        Assert.Equal(source.GroupName, copy.GroupName);
+        Assert.Equal(source.Host, copy.Host);
+        Assert.Equal(source.Port, copy.Port);
+        Assert.Equal(source.Username, copy.Username);
+        Assert.Equal(source.AuthenticationType, copy.AuthenticationType);
+        Assert.Equal(createdAt, copy.CreatedAt);
+        Assert.Equal(createdAt, copy.UpdatedAt);
+        Assert.Null(copy.LastConnectedAt);
+    }
+
+    [Fact]
+    public void CreateCopy_AppendsFirstAvailableSuffixForRepeatedCopies()
+    {
+        var copy = SearchProfile.CreateCopy(
+            Guid.NewGuid(),
+            ["生产 Web", "生产 Web - 副本", "生产 Web - 副本 (2)", "生产 Web - 副本 (4)"],
+            DateTimeOffset.UtcNow);
+
+        Assert.Equal("生产 Web - 副本 (3)", copy.Name);
+    }
+
+    [Fact]
+    public void CreateCopy_RejectsEmptyIdentity()
+    {
+        Assert.Throws<ArgumentException>(() => SearchProfile.CreateCopy(
+            Guid.Empty,
+            [],
+            DateTimeOffset.UtcNow));
+    }
 }

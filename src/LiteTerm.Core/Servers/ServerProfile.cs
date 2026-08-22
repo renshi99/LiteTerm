@@ -73,6 +73,31 @@ public sealed record ServerProfile(
         }
     }
 
+    /// <summary>
+    /// 创建不共享标识和连接历史的服务器资料副本。
+    /// </summary>
+    public ServerProfile CreateCopy(
+        Guid newId,
+        IEnumerable<string> existingNames,
+        DateTimeOffset createdAt)
+    {
+        if (newId == Guid.Empty)
+        {
+            throw new ArgumentException("新服务器标识不能为空。", nameof(newId));
+        }
+
+        ArgumentNullException.ThrowIfNull(existingNames);
+        var copyName = ResolveAvailableName($"{Name.Trim()} - 副本", existingNames, appendSuffix: false);
+        return this with
+        {
+            Id = newId,
+            Name = copyName,
+            CreatedAt = createdAt,
+            UpdatedAt = createdAt,
+            LastConnectedAt = null
+        };
+    }
+
     public void Validate()
     {
         if (Id == Guid.Empty)

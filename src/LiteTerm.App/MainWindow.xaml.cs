@@ -55,6 +55,7 @@ public partial class MainWindow : Window
             item is ServerProfile profile && profile.MatchesSearch(ServerSearchTextBox.Text);
         _serverProfilesView.GroupDescriptions.Add(
             new PropertyGroupDescription(nameof(ServerProfile.GroupName), new ServerGroupNameConverter()));
+        ApplyServerSort();
         ServerList.ItemsSource = _serverProfilesView;
         _session.OutputReceived += Session_OutputReceived;
         _session.StateChanged += Session_StateChanged;
@@ -447,6 +448,37 @@ public partial class MainWindow : Window
         }
     }
 
+    private async void CopyServer_Click(object sender, RoutedEventArgs e)
+    {
+        if (ServerList.SelectedItem is not ServerProfile profile)
+        {
+            ShowSelectServerMessage();
+            return;
+        }
+
+        try
+        {
+            var credential = await _dataStore.GetCredentialAsync(profile.Id);
+            var copiedProfile = profile.CreateCopy(
+                Guid.NewGuid(),
+                _serverProfiles.Select(existingProfile => existingProfile.Name),
+                DateTimeOffset.UtcNow);
+            var copiedCredential = (credential ?? new ServerCredential(profile.Id, null, null)) with
+            {
+                ServerId = copiedProfile.Id
+            };
+
+            await _dataStore.SaveWithCredentialAsync(copiedProfile, copiedCredential);
+            await RefreshServerProfilesAsync(copiedProfile.Id);
+        }
+        catch (Exception)
+        {
+            MessageBox.Show(this,
+                "无法复制服务器资料和受保护的凭据。",
+                "服务器管理", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
     private async void ConnectSavedServer_Click(object sender, RoutedEventArgs e)
     {
         await ConnectSelectedServerAsync();
@@ -461,6 +493,37 @@ public partial class MainWindow : Window
 
         _serverProfilesView.Refresh();
         UpdateServerCount();
+    }
+
+    private void ServerSortComboBox_SelectionChanged(
+        object sender,
+        System.Windows.Controls.SelectionChangedEventArgs e)
+    {
+        if (_serverProfilesView is null)
+        {
+            return;
+        }
+
+        ApplyServerSort();
+    }
+
+    private void ApplyServerSort()
+    {
+        using (_serverProfilesView.DeferRefresh())
+        {
+            _serverProfilesView.SortDescriptions.Clear();
+            _serverProfilesView.SortDescriptions.Add(
+                new SortDescription(nameof(ServerProfile.GroupName), ListSortDirection.Ascending));
+
+            if (ServerSortComboBox.SelectedIndex == 1)
+            {
+                _serverProfilesView.SortDescriptions.Add(
+                    new SortDescription(nameof(ServerProfile.LastConnectedAt), ListSortDirection.Descending));
+            }
+
+            _serverProfilesView.SortDescriptions.Add(
+                new SortDescription(nameof(ServerProfile.Name), ListSortDirection.Ascending));
+        }
     }
 
     private async void ServerList_MouseDoubleClick(object sender, System.Windows.Input.MouseButtonEventArgs e)

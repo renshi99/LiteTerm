@@ -76,6 +76,25 @@ public sealed class SqliteServerProfileRepositoryTests : IDisposable
     }
 
     [Fact]
+    public async Task SaveWithCredentialAsync_PersistsCopiedProfileWithIndependentCredentialReference()
+    {
+        var databasePath = Path.Combine(_directory, "liteterm.db");
+        var repository = new SqliteServerProfileRepository(databasePath, new TestSecretProtector());
+        var source = CreateProfile() with { LastConnectedAt = DateTimeOffset.UtcNow };
+        var sourceCredential = new ServerCredential(source.Id, null, "copied-passphrase");
+        await repository.SaveWithCredentialAsync(source, sourceCredential);
+
+        var copy = source.CreateCopy(Guid.NewGuid(), [source.Name], DateTimeOffset.UtcNow.AddMinutes(1));
+        var copiedCredential = sourceCredential with { ServerId = copy.Id };
+        await repository.SaveWithCredentialAsync(copy, copiedCredential);
+
+        Assert.Equal(source, await repository.GetByIdAsync(source.Id));
+        Assert.Equal(sourceCredential, await repository.GetCredentialAsync(source.Id));
+        Assert.Equal(copy, await repository.GetByIdAsync(copy.Id));
+        Assert.Equal(copiedCredential, await repository.GetCredentialAsync(copy.Id));
+    }
+
+    [Fact]
     public async Task SaveWithCredentialAsync_RejectsCredentialForAnotherServerBeforeWriting()
     {
         var databasePath = Path.Combine(_directory, "liteterm.db");
