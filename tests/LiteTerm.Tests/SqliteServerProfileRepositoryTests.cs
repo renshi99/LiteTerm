@@ -1,8 +1,10 @@
 using System.Text;
+using System.Text.Json;
 using LiteTerm.Core.Connections;
 using LiteTerm.Core.Security;
 using LiteTerm.Core.Servers;
 using LiteTerm.Infrastructure.Data;
+using Microsoft.Data.Sqlite;
 
 namespace LiteTerm.Tests;
 
@@ -47,6 +49,77 @@ public sealed class SqliteServerProfileRepositoryTests : IDisposable
 
         Assert.Null(await repository.GetByIdAsync(profile.Id));
         Assert.Null(await repository.GetCredentialAsync(profile.Id));
+    }
+
+    [Fact]
+    public async Task KnownHosts_ArePersistedAndMismatchesAreRejectedAcrossRepositoryInstances()
+    {
+        var databasePath = Path.Combine(_directory, "liteterm.db");
+        var hostKey = new HostKeyInfo("ssh-ed25519", "SHA256:trusted");
+        var firstRepository = new SqliteServerProfileRepository(databasePath, new TestSecretProtector());
+        await firstRepository.InitializeAsync();
+
+        Assert.Equal(KnownHostVerificationStatus.Unknown, firstRepository.Verify("Example.COM", 22, hostKey).Status);
+        firstRepository.Trust("Example.COM", 22, hostKey);
+
+        var secondRepository = new SqliteServerProfileRepository(databasePath, new TestSecretProtector());
+        await secondRepository.InitializeAsync();
+        Assert.Equal(KnownHostVerificationStatus.Trusted, secondRepository.Verify("example.com.", 22, hostKey).Status);
+
+        var mismatch = secondRepository.Verify(
+            "example.com",
+            22,
+            new HostKeyInfo("rsa-sha2-512", "SHA256:changed"));
+        Assert.Equal(KnownHostVerificationStatus.Mismatch, mismatch.Status);
+        Assert.Equal(hostKey.Sha256Fingerprint, mismatch.ExpectedHost?.Sha256Fingerprint);
+    }
+
+    [Fact]
+    public async Task InitializeAsync_ImportsLegacyJsonKnownHostsWithoutOverwritingDatabaseTrust()
+    {
+        var databasePath = Path.Combine(_directory, "liteterm.db");
+        var legacyPath = Path.Combine(_directory, "known_hosts.json");
+        var legacyKey = new HostKeyInfo("ssh-ed25519", "SHA256:legacy");
+        Directory.CreateDirectory(_directory);
+        await File.WriteAllTextAsync(
+            legacyPath,
+            JsonSerializer.Serialize(new[] { new KnownHostEntry("Legacy.Example.COM", 2222, legacyKey.Algorithm, legacyKey.Sha256Fingerprint) }));
+
+        var repository = new SqliteServerProfileRepository(databasePath, new TestSecretProtector(), legacyPath);
+        await repository.InitializeAsync();
+        Assert.Equal(KnownHostVerificationStatus.Trusted, repository.Verify("legacy.example.com", 2222, legacyKey).Status);
+
+        var replacementKey = new HostKeyInfo("ssh-ed25519", "SHA256:replacement");
+        repository.Trust("legacy.example.com", 2222, replacementKey);
+        var restartedRepository = new SqliteServerProfileRepository(databasePath, new TestSecretProtector(), legacyPath);
+        await restartedRepository.InitializeAsync();
+        Assert.Equal(KnownHostVerificationStatus.Trusted, restartedRepository.Verify("legacy.example.com", 2222, replacementKey).Status);
+    }
+
+    [Fact]
+    public async Task InitializeAsync_UpgradesVersionOneDatabaseWithoutLosingProfiles()
+    {
+        var databasePath = Path.Combine(_directory, "liteterm.db");
+        var profile = CreateProfile();
+        var initialRepository = new SqliteServerProfileRepository(databasePath, new TestSecretProtector());
+        await initialRepository.SaveAsync(profile);
+
+        var connectionString = new SqliteConnectionStringBuilder { DataSource = databasePath, Pooling = false }.ToString();
+        await using (var connection = new SqliteConnection(connectionString))
+        {
+            await connection.OpenAsync();
+            await using var command = connection.CreateCommand();
+            command.CommandText = "DROP TABLE known_host; DELETE FROM schema_migration WHERE version = 2;";
+            await command.ExecuteNonQueryAsync();
+        }
+
+        var upgradedRepository = new SqliteServerProfileRepository(databasePath, new TestSecretProtector());
+        await upgradedRepository.InitializeAsync();
+
+        Assert.Equal(profile, await upgradedRepository.GetByIdAsync(profile.Id));
+        Assert.Equal(
+            KnownHostVerificationStatus.Unknown,
+            upgradedRepository.Verify("new.example.com", 22, new HostKeyInfo("ssh-ed25519", "SHA256:new")).Status);
     }
 
     public void Dispose()

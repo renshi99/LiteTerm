@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using System.Runtime.Versioning;
 using LiteTerm.Core.Security;
 
 namespace LiteTerm.Infrastructure.Security;
@@ -6,6 +7,7 @@ namespace LiteTerm.Infrastructure.Security;
 /// <summary>
 /// 使用当前 Windows 用户的 DPAPI 范围保护本地敏感数据。
 /// </summary>
+[SupportedOSPlatform("windows")]
 public sealed class WindowsDpapiSecretProtector : ISecretProtector
 {
     public byte[] Protect(ReadOnlySpan<byte> plaintext)

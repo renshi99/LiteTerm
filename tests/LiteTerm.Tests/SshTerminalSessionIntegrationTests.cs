@@ -1,25 +1,18 @@
 using System.Text;
 using LiteTerm.Core.Connections;
 using LiteTerm.Infrastructure.Ssh;
-using Xunit.Sdk;
 
 namespace LiteTerm.Tests;
 
 [Trait("Category", "Integration")]
 public sealed class SshTerminalSessionIntegrationTests
 {
-    [Fact]
+    [SshIntegrationFact]
     public async Task ConnectAsync_WithConfiguredTestServer_ExchangesUtf8TerminalData()
     {
         var host = Environment.GetEnvironmentVariable("LITETERM_TEST_SSH_HOST");
         var username = Environment.GetEnvironmentVariable("LITETERM_TEST_SSH_USERNAME");
         var password = Environment.GetEnvironmentVariable("LITETERM_TEST_SSH_PASSWORD");
-        if (string.IsNullOrWhiteSpace(host)
-            || string.IsNullOrWhiteSpace(username)
-            || string.IsNullOrWhiteSpace(password))
-        {
-            throw SkipException.ForSkip("需要设置 LITETERM_TEST_SSH_HOST、LITETERM_TEST_SSH_USERNAME 和 LITETERM_TEST_SSH_PASSWORD 才能运行 SSH 集成测试。");
-        }
 
         var marker = $"LITETERM-{Guid.NewGuid():N}";
         var outputReceived = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -39,9 +32,9 @@ public sealed class SshTerminalSessionIntegrationTests
         await session.ConnectAsync(
             new SshConnectionOptions
             {
-                Host = host,
-                Username = username,
-                Password = password
+                Host = host!,
+                Username = username!,
+                Password = password!
             },
             hostKey =>
             {
@@ -63,5 +56,18 @@ public sealed class SshTerminalSessionIntegrationTests
 
         await session.DisconnectAsync(cancellation.Token);
         Assert.Equal(ConnectionState.Disconnected, session.State);
+    }
+}
+
+public sealed class SshIntegrationFactAttribute : FactAttribute
+{
+    public SshIntegrationFactAttribute()
+    {
+        if (string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("LITETERM_TEST_SSH_HOST"))
+            || string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("LITETERM_TEST_SSH_USERNAME"))
+            || string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("LITETERM_TEST_SSH_PASSWORD")))
+        {
+            Skip = "需要设置 SSH 集成测试环境变量后才能运行。";
+        }
     }
 }

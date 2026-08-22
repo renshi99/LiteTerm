@@ -5,8 +5,8 @@ using System.Windows;
 using System.Windows.Media;
 using System.Windows.Threading;
 using LiteTerm.Core.Connections;
+using LiteTerm.Core.Servers;
 using LiteTerm.Core.Terminal;
-using LiteTerm.Infrastructure.Ssh;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Win32;
 
@@ -14,11 +14,9 @@ namespace LiteTerm.App;
 
 public partial class MainWindow : Window
 {
-    private readonly ISshTerminalSession _session = new SshTerminalSession();
-    private readonly IKnownHostStore _knownHostStore = new JsonKnownHostStore(Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-        "LiteTerm",
-        "known_hosts.json"));
+    private readonly ISshTerminalSession _session;
+    private readonly IServerProfileRepository _dataStore;
+    private readonly IKnownHostStore _knownHostStore;
     private const int OutputBufferCapacityBytes = 1024 * 1024;
     private const int MaximumOutputBatchBytes = 64 * 1024;
     private readonly BoundedTerminalOutputBuffer _outputBuffer = new(OutputBufferCapacityBytes);
@@ -28,8 +26,18 @@ public partial class MainWindow : Window
     private int _rows = 24;
     private bool _terminalReady;
 
-    public MainWindow()
+    public MainWindow(
+        ISshTerminalSession session,
+        IServerProfileRepository dataStore,
+        IKnownHostStore knownHostStore)
     {
+        ArgumentNullException.ThrowIfNull(session);
+        ArgumentNullException.ThrowIfNull(dataStore);
+        ArgumentNullException.ThrowIfNull(knownHostStore);
+        _session = session;
+        _dataStore = dataStore;
+        _knownHostStore = knownHostStore;
+
         InitializeComponent();
         _session.OutputReceived += Session_OutputReceived;
         _session.StateChanged += Session_StateChanged;
@@ -42,6 +50,19 @@ public partial class MainWindow : Window
 
     private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
     {
+        try
+        {
+            await _dataStore.InitializeAsync();
+        }
+        catch (Exception)
+        {
+            SetStatus("本地数据初始化失败", "#EF4444");
+            MessageBox.Show(this,
+                "无法初始化本地数据存储。请检查应用数据目录是否可访问。",
+                "LiteTerm", MessageBoxButton.OK, MessageBoxImage.Error);
+            return;
+        }
+
         try
         {
             await TerminalWebView.EnsureCoreWebView2Async();
@@ -190,11 +211,7 @@ public partial class MainWindow : Window
                 _ => false
             };
         }
-        catch (Exception exception) when (exception is IOException
-                                         or UnauthorizedAccessException
-                                         or JsonException
-                                         or InvalidDataException
-                                         or ArgumentException)
+        catch (Exception)
         {
             Dispatcher.Invoke(() => MessageBox.Show(this,
                 "无法读取或更新已知主机记录，已取消本次连接。\n\n请检查应用数据目录是否可访问。",

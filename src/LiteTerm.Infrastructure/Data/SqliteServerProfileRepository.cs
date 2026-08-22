@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text;
+using System.Text.Json;
 using LiteTerm.Core.Connections;
 using LiteTerm.Core.Security;
 using LiteTerm.Core.Servers;
@@ -8,19 +9,23 @@ using Microsoft.Data.Sqlite;
 namespace LiteTerm.Infrastructure.Data;
 
 /// <summary>
-/// 使用版本化 SQLite 架构保存服务器公开资料和经 DPAPI 保护的凭据。
+/// 使用版本化 SQLite 架构保存服务器公开资料、经 DPAPI 保护的凭据和已知主机身份。
 /// </summary>
-public sealed class SqliteServerProfileRepository : IServerProfileRepository
+public sealed class SqliteServerProfileRepository : IServerProfileRepository, IKnownHostStore
 {
-    private const int CurrentSchemaVersion = 1;
+    private const int CurrentSchemaVersion = 2;
 
     private readonly string _databasePath;
     private readonly string _connectionString;
+    private readonly string? _legacyKnownHostsPath;
     private readonly ISecretProtector _secretProtector;
     private readonly SemaphoreSlim _initializationLock = new(1, 1);
-    private bool _initialized;
+    private volatile bool _initialized;
 
-    public SqliteServerProfileRepository(string databasePath, ISecretProtector secretProtector)
+    public SqliteServerProfileRepository(
+        string databasePath,
+        ISecretProtector secretProtector,
+        string? legacyKnownHostsPath = null)
     {
         if (string.IsNullOrWhiteSpace(databasePath))
         {
@@ -30,11 +35,15 @@ public sealed class SqliteServerProfileRepository : IServerProfileRepository
         ArgumentNullException.ThrowIfNull(secretProtector);
 
         _databasePath = Path.GetFullPath(databasePath);
+        _legacyKnownHostsPath = string.IsNullOrWhiteSpace(legacyKnownHostsPath)
+            ? null
+            : Path.GetFullPath(legacyKnownHostsPath);
         _connectionString = new SqliteConnectionStringBuilder
         {
             DataSource = _databasePath,
             Mode = SqliteOpenMode.ReadWriteCreate,
-            ForeignKeys = true
+            ForeignKeys = true,
+            Pooling = false
         }.ToString();
         _secretProtector = secretProtector;
     }
@@ -52,6 +61,7 @@ public sealed class SqliteServerProfileRepository : IServerProfileRepository
             Directory.CreateDirectory(Path.GetDirectoryName(_databasePath)!);
             await using var connection = await OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
             await ApplyMigrationsAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ImportLegacyKnownHostsAsync(connection, cancellationToken).ConfigureAwait(false);
             _initialized = true;
         }
         finally
@@ -206,6 +216,55 @@ public sealed class SqliteServerProfileRepository : IServerProfileRepository
         await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
+    public KnownHostVerificationResult Verify(string host, int port, HostKeyInfo hostKey)
+    {
+        EnsureInitialized();
+        var normalizedHost = NormalizeHost(host);
+        ValidatePort(port);
+        ValidateHostKey(hostKey);
+
+        using var connection = new SqliteConnection(_connectionString);
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT algorithm, sha256_fingerprint FROM known_host WHERE host = $host AND port = $port;";
+        command.Parameters.AddWithValue("$host", normalizedHost);
+        command.Parameters.AddWithValue("$port", port);
+        using var reader = command.ExecuteReader();
+        if (!reader.Read())
+        {
+            return new KnownHostVerificationResult(KnownHostVerificationStatus.Unknown, null);
+        }
+
+        var expected = new KnownHostEntry(normalizedHost, port, reader.GetString(0), reader.GetString(1));
+        var isMatch = string.Equals(expected.Algorithm, hostKey.Algorithm, StringComparison.Ordinal)
+                      && string.Equals(expected.Sha256Fingerprint, hostKey.Sha256Fingerprint, StringComparison.Ordinal);
+        return new KnownHostVerificationResult(
+            isMatch ? KnownHostVerificationStatus.Trusted : KnownHostVerificationStatus.Mismatch,
+            expected);
+    }
+
+    public void Trust(string host, int port, HostKeyInfo hostKey)
+    {
+        EnsureInitialized();
+        var normalizedHost = NormalizeHost(host);
+        ValidatePort(port);
+        ValidateHostKey(hostKey);
+
+        using var connection = new SqliteConnection(_connectionString);
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            INSERT INTO known_host (host, port, algorithm, sha256_fingerprint, trusted_at_utc)
+            VALUES ($host, $port, $algorithm, $fingerprint, $trustedAt)
+            ON CONFLICT(host, port) DO UPDATE SET
+                algorithm = excluded.algorithm,
+                sha256_fingerprint = excluded.sha256_fingerprint,
+                trusted_at_utc = excluded.trusted_at_utc;
+            """;
+        AddKnownHostParameters(command, normalizedHost, port, hostKey, DateTimeOffset.UtcNow);
+        command.ExecuteNonQuery();
+    }
+
     private static async Task ApplyMigrationsAsync(SqliteConnection connection, CancellationToken cancellationToken)
     {
         await using (var command = connection.CreateCommand())
@@ -220,18 +279,33 @@ public sealed class SqliteServerProfileRepository : IServerProfileRepository
         }
 
         await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
-        if (!await IsMigrationAppliedAsync(connection, transaction, CurrentSchemaVersion, cancellationToken).ConfigureAwait(false))
+        if (!await IsMigrationAppliedAsync(connection, transaction, 1, cancellationToken).ConfigureAwait(false))
         {
             await ApplyInitialSchemaAsync(connection, transaction, cancellationToken).ConfigureAwait(false);
-            await using var command = connection.CreateCommand();
-            command.Transaction = transaction;
-            command.CommandText = "INSERT INTO schema_migration (version, applied_at_utc) VALUES ($version, $appliedAt);";
-            command.Parameters.AddWithValue("$version", CurrentSchemaVersion);
-            command.Parameters.AddWithValue("$appliedAt", ToStorageValue(DateTimeOffset.UtcNow));
-            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            await RecordMigrationAsync(connection, transaction, 1, cancellationToken).ConfigureAwait(false);
+        }
+
+        if (!await IsMigrationAppliedAsync(connection, transaction, CurrentSchemaVersion, cancellationToken).ConfigureAwait(false))
+        {
+            await ApplyKnownHostsSchemaAsync(connection, transaction, cancellationToken).ConfigureAwait(false);
+            await RecordMigrationAsync(connection, transaction, CurrentSchemaVersion, cancellationToken).ConfigureAwait(false);
         }
 
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task RecordMigrationAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        int version,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "INSERT INTO schema_migration (version, applied_at_utc) VALUES ($version, $appliedAt);";
+        command.Parameters.AddWithValue("$version", version);
+        command.Parameters.AddWithValue("$appliedAt", ToStorageValue(DateTimeOffset.UtcNow));
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
     private static async Task<bool> IsMigrationAppliedAsync(
@@ -286,6 +360,54 @@ public sealed class SqliteServerProfileRepository : IServerProfileRepository
         await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
+    private static async Task ApplyKnownHostsSchemaAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            CREATE TABLE known_host (
+                host TEXT NOT NULL,
+                port INTEGER NOT NULL,
+                algorithm TEXT NOT NULL,
+                sha256_fingerprint TEXT NOT NULL,
+                trusted_at_utc TEXT NOT NULL,
+                PRIMARY KEY (host, port)
+            );
+            """;
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task ImportLegacyKnownHostsAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        if (_legacyKnownHostsPath is null || !File.Exists(_legacyKnownHostsPath))
+        {
+            return;
+        }
+
+        await using var stream = new FileStream(_legacyKnownHostsPath, FileMode.Open, FileAccess.Read, FileShare.Read);
+        var entries = await JsonSerializer.DeserializeAsync<List<KnownHostEntry>>(stream, cancellationToken: cancellationToken)
+            .ConfigureAwait(false) ?? throw new InvalidDataException("旧版已知主机文件格式无效。");
+
+        foreach (var entry in entries)
+        {
+            var normalizedHost = NormalizeHost(entry.Host);
+            ValidatePort(entry.Port);
+            var hostKey = new HostKeyInfo(entry.Algorithm, entry.Sha256Fingerprint);
+            ValidateHostKey(hostKey);
+
+            await using var command = connection.CreateCommand();
+            command.CommandText = """
+                INSERT OR IGNORE INTO known_host (host, port, algorithm, sha256_fingerprint, trusted_at_utc)
+                VALUES ($host, $port, $algorithm, $fingerprint, $trustedAt);
+                """;
+            AddKnownHostParameters(command, normalizedHost, entry.Port, hostKey, DateTimeOffset.UtcNow);
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+    }
+
     private async Task<SqliteConnection> OpenConnectionAsync(CancellationToken cancellationToken)
     {
         var connection = new SqliteConnection(_connectionString);
@@ -320,6 +442,20 @@ public sealed class SqliteServerProfileRepository : IServerProfileRepository
         command.Parameters.AddWithValue("$lastConnectedAt", profile.LastConnectedAt is { } lastConnectedAt
             ? ToStorageValue(lastConnectedAt)
             : DBNull.Value);
+    }
+
+    private static void AddKnownHostParameters(
+        SqliteCommand command,
+        string host,
+        int port,
+        HostKeyInfo hostKey,
+        DateTimeOffset trustedAt)
+    {
+        command.Parameters.AddWithValue("$host", host);
+        command.Parameters.AddWithValue("$port", port);
+        command.Parameters.AddWithValue("$algorithm", hostKey.Algorithm);
+        command.Parameters.AddWithValue("$fingerprint", hostKey.Sha256Fingerprint);
+        command.Parameters.AddWithValue("$trustedAt", ToStorageValue(trustedAt));
     }
 
     private ServerProfile ReadProfile(SqliteDataReader reader)
@@ -382,6 +518,42 @@ public sealed class SqliteServerProfileRepository : IServerProfileRepository
         if (serverId == Guid.Empty)
         {
             throw new ArgumentException("服务器标识不能为空。", nameof(serverId));
+        }
+    }
+
+    private void EnsureInitialized()
+    {
+        if (!_initialized)
+        {
+            throw new InvalidOperationException("服务器数据存储尚未初始化。");
+        }
+    }
+
+    private static string NormalizeHost(string host)
+    {
+        var normalizedHost = host.Trim().TrimEnd('.').ToLowerInvariant();
+        if (string.IsNullOrWhiteSpace(normalizedHost))
+        {
+            throw new ArgumentException("主机不能为空。", nameof(host));
+        }
+
+        return normalizedHost;
+    }
+
+    private static void ValidatePort(int port)
+    {
+        if (port is < 1 or > 65535)
+        {
+            throw new ArgumentOutOfRangeException(nameof(port), "端口必须介于 1 和 65535 之间。");
+        }
+    }
+
+    private static void ValidateHostKey(HostKeyInfo hostKey)
+    {
+        ArgumentNullException.ThrowIfNull(hostKey);
+        if (string.IsNullOrWhiteSpace(hostKey.Algorithm) || string.IsNullOrWhiteSpace(hostKey.Sha256Fingerprint))
+        {
+            throw new ArgumentException("主机密钥信息无效。", nameof(hostKey));
         }
     }
 }
