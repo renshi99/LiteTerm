@@ -46,6 +46,7 @@
                     <ColumnDefinition Width="130" />
                     <ColumnDefinition Width="Auto" />
                     <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
                 </Grid.ColumnDefinitions>
 
                 <TextBlock Grid.Row="0" Grid.Column="0" Text="主机 / IP" Foreground="#9CA3AF" FontSize="11" Margin="2,0,0,3" />
@@ -62,7 +63,8 @@
                     <ComboBoxItem Content="私钥" Tag="PrivateKey" />
                 </ComboBox>
                 <Button x:Name="ConnectButton" Grid.Row="1" Grid.Column="4" Content="连接" Click="Connect_Click" IsDefault="True" />
-                <Button x:Name="DisconnectButton" Grid.Row="1" Grid.Column="5" Content="断开" Click="Disconnect_Click" IsEnabled="False" Margin="0" />
+                <Button x:Name="DisconnectButton" Grid.Row="1" Grid.Column="5" Content="断开" Click="Disconnect_Click" IsEnabled="False" />
+                <Button Grid.Row="1" Grid.Column="6" Content="终端外观" Click="TerminalAppearance_Click" Margin="0" />
 
                 <Grid x:Name="PasswordPanel" Grid.Row="2" Grid.Column="0" Grid.ColumnSpan="4" Margin="0,8,0,0">
                     <Grid.ColumnDefinitions>
@@ -90,8 +92,8 @@
             </Grid>
         </Border>
 
-        <Border Grid.Row="1" Background="#0B1020" Padding="1">
-            <wv2:WebView2 x:Name="TerminalWebView" DefaultBackgroundColor="#0B1020" />
+        <Border x:Name="TerminalBorder" Grid.Row="1" Background="#050816" Padding="1">
+            <wv2:WebView2 x:Name="TerminalWebView" DefaultBackgroundColor="#050816" />
         </Border>
 
         <Border Grid.Row="2" Background="#1F2937" BorderBrush="#374151" BorderThickness="0,1,0,0">

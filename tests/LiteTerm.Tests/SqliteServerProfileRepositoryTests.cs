@@ -3,6 +3,7 @@ using System.Text.Json;
 using LiteTerm.Core.Connections;
 using LiteTerm.Core.Security;
 using LiteTerm.Core.Servers;
+using LiteTerm.Core.Settings;
 using LiteTerm.Infrastructure.Data;
 using Microsoft.Data.Sqlite;
 
@@ -109,7 +110,11 @@ public sealed class SqliteServerProfileRepositoryTests : IDisposable
         {
             await connection.OpenAsync();
             await using var command = connection.CreateCommand();
-            command.CommandText = "DROP TABLE known_host; DELETE FROM schema_migration WHERE version = 2;";
+            command.CommandText = """
+                DROP TABLE known_host;
+                DROP TABLE app_setting;
+                DELETE FROM schema_migration WHERE version >= 2;
+                """;
             await command.ExecuteNonQueryAsync();
         }
 
@@ -120,6 +125,22 @@ public sealed class SqliteServerProfileRepositoryTests : IDisposable
         Assert.Equal(
             KnownHostVerificationStatus.Unknown,
             upgradedRepository.Verify("new.example.com", 22, new HostKeyInfo("ssh-ed25519", "SHA256:new")).Status);
+    }
+
+    [Fact]
+    public async Task TerminalAppearance_UsesDefaultsAndPersistsNormalizedCustomColors()
+    {
+        var databasePath = Path.Combine(_directory, "liteterm.db");
+        var firstRepository = new SqliteServerProfileRepository(databasePath, new TestSecretProtector());
+
+        Assert.Equal(TerminalAppearanceSettings.Default, await firstRepository.GetTerminalAppearanceAsync());
+
+        await firstRepository.SaveTerminalAppearanceAsync(new TerminalAppearanceSettings("#abcdef", "#102030"));
+        var secondRepository = new SqliteServerProfileRepository(databasePath, new TestSecretProtector());
+
+        Assert.Equal(
+            new TerminalAppearanceSettings("#ABCDEF", "#102030"),
+            await secondRepository.GetTerminalAppearanceAsync());
     }
 
     public void Dispose()

@@ -11,7 +11,7 @@ namespace LiteTerm.App;
 /// <summary>
 /// Interaction logic for App.xaml
 /// </summary>
-public partial class App : Application
+public partial class App : System.Windows.Application
 {
     protected override void OnStartup(StartupEventArgs e)
     {
@@ -25,7 +25,7 @@ public partial class App : Application
             new WindowsDpapiSecretProtector(),
             Path.Combine(applicationDataDirectory, "known_hosts.json"));
 
-        MainWindow = new MainWindow(new SshTerminalSession(), dataStore, dataStore);
+        MainWindow = new MainWindow(new SshTerminalSession(), dataStore, dataStore, dataStore);
         MainWindow.Show();
     }
 }

@@ -1,9 +1,11 @@
+html { --terminal-background: #050816; }
+
 html, body, #terminal-shell, #terminal {
   width: 100%;
   height: 100%;
   margin: 0;
   overflow: hidden;
-  background: #0b1020;
+  background: var(--terminal-background);
 }
 
 #terminal {
@@ -65,6 +67,6 @@ html, body, #terminal-shell, #terminal {
 .xterm { height: 100%; }
 
 ::-webkit-scrollbar { width: 10px; }
-::-webkit-scrollbar-track { background: #0b1020; }
+::-webkit-scrollbar-track { background: var(--terminal-background); }
 ::-webkit-scrollbar-thumb { background: #334155; border-radius: 5px; }
 ::-webkit-scrollbar-thumb:hover { background: #475569; }

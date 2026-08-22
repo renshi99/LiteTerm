@@ -6,6 +6,7 @@ using System.Windows.Media;
 using System.Windows.Threading;
 using LiteTerm.Core.Connections;
 using LiteTerm.Core.Servers;
+using LiteTerm.Core.Settings;
 using LiteTerm.Core.Terminal;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Win32;
@@ -17,6 +18,7 @@ public partial class MainWindow : Window
     private readonly ISshTerminalSession _session;
     private readonly IServerProfileRepository _dataStore;
     private readonly IKnownHostStore _knownHostStore;
+    private readonly ITerminalAppearanceSettingsStore _terminalAppearanceStore;
     private const int OutputBufferCapacityBytes = 1024 * 1024;
     private const int MaximumOutputBatchBytes = 64 * 1024;
     private readonly BoundedTerminalOutputBuffer _outputBuffer = new(OutputBufferCapacityBytes);
@@ -25,18 +27,22 @@ public partial class MainWindow : Window
     private int _columns = 80;
     private int _rows = 24;
     private bool _terminalReady;
+    private TerminalAppearanceSettings _terminalAppearance = TerminalAppearanceSettings.Default;
 
     public MainWindow(
         ISshTerminalSession session,
         IServerProfileRepository dataStore,
-        IKnownHostStore knownHostStore)
+        IKnownHostStore knownHostStore,
+        ITerminalAppearanceSettingsStore terminalAppearanceStore)
     {
         ArgumentNullException.ThrowIfNull(session);
         ArgumentNullException.ThrowIfNull(dataStore);
         ArgumentNullException.ThrowIfNull(knownHostStore);
+        ArgumentNullException.ThrowIfNull(terminalAppearanceStore);
         _session = session;
         _dataStore = dataStore;
         _knownHostStore = knownHostStore;
+        _terminalAppearanceStore = terminalAppearanceStore;
 
         InitializeComponent();
         _session.OutputReceived += Session_OutputReceived;
@@ -53,6 +59,8 @@ public partial class MainWindow : Window
         try
         {
             await _dataStore.InitializeAsync();
+            _terminalAppearance = await _terminalAppearanceStore.GetTerminalAppearanceAsync();
+            UpdateTerminalHostBackground();
         }
         catch (Exception)
         {
@@ -255,6 +263,7 @@ public partial class MainWindow : Window
             {
                 case "ready":
                     _terminalReady = true;
+                    ApplyTerminalAppearance();
                     SetStatus("终端已就绪", "#9CA3AF");
                     break;
                 case "input" when root.TryGetProperty("data", out var dataElement):
@@ -285,6 +294,53 @@ public partial class MainWindow : Window
         {
             await Dispatcher.InvokeAsync(() => SetStatus("终端输入发送失败，连接可能已中断。", "#EF4444"));
         }
+    }
+
+    private async void TerminalAppearance_Click(object sender, RoutedEventArgs e)
+    {
+        var dialog = new TerminalAppearanceWindow(_terminalAppearance)
+        {
+            Owner = this
+        };
+        if (dialog.ShowDialog() != true)
+        {
+            return;
+        }
+
+        try
+        {
+            await _terminalAppearanceStore.SaveTerminalAppearanceAsync(dialog.Settings);
+            _terminalAppearance = dialog.Settings;
+            UpdateTerminalHostBackground();
+            ApplyTerminalAppearance();
+        }
+        catch (Exception)
+        {
+            MessageBox.Show(this,
+                "无法保存终端外观设置，请检查应用数据目录是否可访问。",
+                "终端外观", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
+    private void ApplyTerminalAppearance()
+    {
+        if (!_terminalReady || TerminalWebView.CoreWebView2 is null)
+        {
+            return;
+        }
+
+        TerminalWebView.CoreWebView2.PostWebMessageAsJson(JsonSerializer.Serialize(new
+        {
+            type = "appearance",
+            foreground = _terminalAppearance.ForegroundColor,
+            background = _terminalAppearance.BackgroundColor
+        }));
+    }
+
+    private void UpdateTerminalHostBackground()
+    {
+        TerminalBorder.Background = (Brush)new BrushConverter().ConvertFromString(_terminalAppearance.BackgroundColor)!;
+        TerminalWebView.DefaultBackgroundColor = System.Drawing.ColorTranslator.FromHtml(_terminalAppearance.BackgroundColor);
     }
 
     private void Terminal_NavigationStarting(object? sender, CoreWebView2NavigationStartingEventArgs eventArgs)

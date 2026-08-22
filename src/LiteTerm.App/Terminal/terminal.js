@@ -11,9 +11,9 @@
     convertEol: false,
     allowProposedApi: false,
     theme: {
-      background: '#0b1020',
-      foreground: '#d7e0ea',
-      cursor: '#93c5fd',
+      background: '#050816',
+      foreground: '#f1f5f9',
+      cursor: '#f1f5f9',
       selectionBackground: '#334155'
     }
   });
@@ -151,7 +151,22 @@
 
   window.chrome.webview.addEventListener('message', event => {
     const message = event.data;
-    if (!message || message.type !== 'output' || typeof message.data !== 'string') return;
+    if (!message) return;
+
+    if (message.type === 'appearance'
+      && /^#[0-9a-f]{6}$/i.test(message.foreground)
+      && /^#[0-9a-f]{6}$/i.test(message.background)) {
+      terminal.options.theme = {
+        ...terminal.options.theme,
+        foreground: message.foreground,
+        background: message.background,
+        cursor: message.foreground
+      };
+      document.documentElement.style.setProperty('--terminal-background', message.background);
+      return;
+    }
+
+    if (message.type !== 'output' || typeof message.data !== 'string') return;
 
     const binary = atob(message.data);
     const bytes = Uint8Array.from(binary, character => character.charCodeAt(0));

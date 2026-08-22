@@ -4,6 +4,7 @@ using System.Text.Json;
 using LiteTerm.Core.Connections;
 using LiteTerm.Core.Security;
 using LiteTerm.Core.Servers;
+using LiteTerm.Core.Settings;
 using Microsoft.Data.Sqlite;
 
 namespace LiteTerm.Infrastructure.Data;
@@ -11,9 +12,13 @@ namespace LiteTerm.Infrastructure.Data;
 /// <summary>
 /// 使用版本化 SQLite 架构保存服务器公开资料、经 DPAPI 保护的凭据和已知主机身份。
 /// </summary>
-public sealed class SqliteServerProfileRepository : IServerProfileRepository, IKnownHostStore
+public sealed class SqliteServerProfileRepository :
+    IServerProfileRepository,
+    IKnownHostStore,
+    ITerminalAppearanceSettingsStore
 {
-    private const int CurrentSchemaVersion = 2;
+    private const int CurrentSchemaVersion = 3;
+    private const string TerminalAppearanceSettingKey = "terminal.appearance";
 
     private readonly string _databasePath;
     private readonly string _connectionString;
@@ -265,6 +270,44 @@ public sealed class SqliteServerProfileRepository : IServerProfileRepository, IK
         command.ExecuteNonQuery();
     }
 
+    public async Task<TerminalAppearanceSettings> GetTerminalAppearanceAsync(
+        CancellationToken cancellationToken = default)
+    {
+        await InitializeAsync(cancellationToken).ConfigureAwait(false);
+        await using var connection = await OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT value FROM app_setting WHERE key = $key;";
+        command.Parameters.AddWithValue("$key", TerminalAppearanceSettingKey);
+        var value = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) as string;
+        if (value is null)
+        {
+            return TerminalAppearanceSettings.Default;
+        }
+
+        var settings = JsonSerializer.Deserialize<TerminalAppearanceSettings>(value)
+            ?? throw new InvalidDataException("终端外观设置格式无效。");
+        return settings.Normalize();
+    }
+
+    public async Task SaveTerminalAppearanceAsync(
+        TerminalAppearanceSettings settings,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(settings);
+        var normalizedSettings = settings.Normalize();
+        await InitializeAsync(cancellationToken).ConfigureAwait(false);
+        await using var connection = await OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            INSERT INTO app_setting (key, value)
+            VALUES ($key, $value)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value;
+            """;
+        command.Parameters.AddWithValue("$key", TerminalAppearanceSettingKey);
+        command.Parameters.AddWithValue("$value", JsonSerializer.Serialize(normalizedSettings));
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+    }
+
     private static async Task ApplyMigrationsAsync(SqliteConnection connection, CancellationToken cancellationToken)
     {
         await using (var command = connection.CreateCommand())
@@ -285,9 +328,15 @@ public sealed class SqliteServerProfileRepository : IServerProfileRepository, IK
             await RecordMigrationAsync(connection, transaction, 1, cancellationToken).ConfigureAwait(false);
         }
 
-        if (!await IsMigrationAppliedAsync(connection, transaction, CurrentSchemaVersion, cancellationToken).ConfigureAwait(false))
+        if (!await IsMigrationAppliedAsync(connection, transaction, 2, cancellationToken).ConfigureAwait(false))
         {
             await ApplyKnownHostsSchemaAsync(connection, transaction, cancellationToken).ConfigureAwait(false);
+            await RecordMigrationAsync(connection, transaction, 2, cancellationToken).ConfigureAwait(false);
+        }
+
+        if (!await IsMigrationAppliedAsync(connection, transaction, CurrentSchemaVersion, cancellationToken).ConfigureAwait(false))
+        {
+            await ApplyAppSettingsSchemaAsync(connection, transaction, cancellationToken).ConfigureAwait(false);
             await RecordMigrationAsync(connection, transaction, CurrentSchemaVersion, cancellationToken).ConfigureAwait(false);
         }
 
@@ -375,6 +424,22 @@ public sealed class SqliteServerProfileRepository : IServerProfileRepository, IK
                 sha256_fingerprint TEXT NOT NULL,
                 trusted_at_utc TEXT NOT NULL,
                 PRIMARY KEY (host, port)
+            );
+            """;
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task ApplyAppSettingsSchemaAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            CREATE TABLE app_setting (
+                key TEXT NOT NULL PRIMARY KEY,
+                value TEXT NOT NULL
             );
             """;
         await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
