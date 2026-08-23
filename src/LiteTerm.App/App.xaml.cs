@@ -4,6 +4,7 @@ using System.IO;
 using System.Windows;
 using LiteTerm.Infrastructure.Data;
 using LiteTerm.Infrastructure.Security;
+using LiteTerm.Infrastructure.Sftp;
 using LiteTerm.Infrastructure.Ssh;
 
 namespace LiteTerm.App;
@@ -25,7 +26,12 @@ public partial class App : System.Windows.Application
             new WindowsDpapiSecretProtector(),
             Path.Combine(applicationDataDirectory, "known_hosts.json"));
 
-        MainWindow = new MainWindow(new SshTerminalSession(), dataStore, dataStore, dataStore);
+        MainWindow = new MainWindow(
+            new SshTerminalSession(),
+            dataStore,
+            dataStore,
+            dataStore,
+            static () => new SftpSession());
         MainWindow.Show();
     }
 }

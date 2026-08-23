@@ -10,6 +10,7 @@ using System.Windows.Threading;
 using LiteTerm.Core.Connections;
 using LiteTerm.Core.Servers;
 using LiteTerm.Core.Settings;
+using LiteTerm.Core.Sftp;
 using LiteTerm.Core.Terminal;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Win32;
@@ -22,6 +23,7 @@ public partial class MainWindow : Window
     private readonly IServerProfileRepository _dataStore;
     private readonly IKnownHostStore _knownHostStore;
     private readonly ITerminalAppearanceSettingsStore _terminalAppearanceStore;
+    private readonly Func<ISftpSession> _sftpSessionFactory;
     private const int OutputBufferCapacityBytes = 1024 * 1024;
     private const int MaximumOutputBatchBytes = 64 * 1024;
     private readonly BoundedTerminalOutputBuffer _outputBuffer = new(OutputBufferCapacityBytes);
@@ -32,22 +34,26 @@ public partial class MainWindow : Window
     private int _columns = 80;
     private int _rows = 24;
     private bool _terminalReady;
+    private SshConnectionOptions? _activeConnectionOptions;
     private TerminalAppearanceSettings _terminalAppearance = TerminalAppearanceSettings.Default;
 
     public MainWindow(
         ISshTerminalSession session,
         IServerProfileRepository dataStore,
         IKnownHostStore knownHostStore,
-        ITerminalAppearanceSettingsStore terminalAppearanceStore)
+        ITerminalAppearanceSettingsStore terminalAppearanceStore,
+        Func<ISftpSession> sftpSessionFactory)
     {
         ArgumentNullException.ThrowIfNull(session);
         ArgumentNullException.ThrowIfNull(dataStore);
         ArgumentNullException.ThrowIfNull(knownHostStore);
         ArgumentNullException.ThrowIfNull(terminalAppearanceStore);
+        ArgumentNullException.ThrowIfNull(sftpSessionFactory);
         _session = session;
         _dataStore = dataStore;
         _knownHostStore = knownHostStore;
         _terminalAppearanceStore = terminalAppearanceStore;
+        _sftpSessionFactory = sftpSessionFactory;
 
         InitializeComponent();
         _serverProfilesView = CollectionViewSource.GetDefaultView(_serverProfiles);
@@ -173,6 +179,7 @@ public partial class MainWindow : Window
                 _rows,
                 connectionCancellation.Token);
             TerminalWebView.Focus();
+            _activeConnectionOptions = options;
             connected = true;
         }
         catch (OperationCanceledException) when (connectionCancellation.IsCancellationRequested)
@@ -362,6 +369,25 @@ public partial class MainWindow : Window
         {
             await Dispatcher.InvokeAsync(() => SetStatus("终端输入发送失败，连接可能已中断。", "#EF4444"));
         }
+    }
+
+    private void Sftp_Click(object sender, RoutedEventArgs e)
+    {
+        var options = _activeConnectionOptions;
+        if (_session.State != ConnectionState.Connected || options is null)
+        {
+            MessageBox.Show(this, "请先建立 SSH 终端连接。", "SFTP", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        var window = new SftpWindow(
+            _sftpSessionFactory(),
+            options,
+            hostKey => VerifyHostKey(options, hostKey))
+        {
+            Owner = this
+        };
+        window.Show();
     }
 
     private async void TerminalAppearance_Click(object sender, RoutedEventArgs e)
@@ -752,16 +778,19 @@ public partial class MainWindow : Window
                 case ConnectionState.Connected:
                     SetStatus("已连接", "#22C55E");
                     SetConnectionControls(false, true);
+                    SftpButton.IsEnabled = true;
                     break;
                 case ConnectionState.Disconnecting:
                     SetStatus("正在断开…", "#F59E0B");
                     SetConnectionControls(false);
                     break;
                 case ConnectionState.Disconnected:
+                    _activeConnectionOptions = null;
                     SetStatus("已断开", "#9CA3AF");
                     SetConnectionControls(true);
                     break;
                 case ConnectionState.Failed:
+                    _activeConnectionOptions = null;
                     SetStatus("连接失败", "#EF4444");
                     SetConnectionControls(true);
                     break;
@@ -783,6 +812,7 @@ public partial class MainWindow : Window
         BrowsePrivateKeyButton.IsEnabled = canConnect;
         PrivateKeyPassphraseInput.IsEnabled = canConnect;
         SaveConnectionCheckBox.IsEnabled = canConnect;
+        SftpButton.IsEnabled = _session.State == ConnectionState.Connected;
     }
 
     private SshAuthenticationType GetSelectedAuthenticationType()

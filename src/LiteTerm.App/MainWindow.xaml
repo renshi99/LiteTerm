@@ -122,6 +122,7 @@
                     <ColumnDefinition Width="Auto" />
                     <ColumnDefinition Width="Auto" />
                     <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
                 </Grid.ColumnDefinitions>
 
                 <TextBlock Grid.Row="0" Grid.Column="0" Text="主机 / IP" Foreground="#9CA3AF" FontSize="11" Margin="2,0,0,3" />
@@ -139,7 +140,8 @@
                 </ComboBox>
                 <Button x:Name="ConnectButton" Grid.Row="1" Grid.Column="4" Content="连接" Click="Connect_Click" IsDefault="True" />
                 <Button x:Name="DisconnectButton" Grid.Row="1" Grid.Column="5" Content="断开" Click="Disconnect_Click" IsEnabled="False" />
-                <Button Grid.Row="1" Grid.Column="6" Content="终端外观" Click="TerminalAppearance_Click" Margin="0" />
+                <Button x:Name="SftpButton" Grid.Row="1" Grid.Column="6" Content="SFTP" Click="Sftp_Click" IsEnabled="False" />
+                <Button Grid.Row="1" Grid.Column="7" Content="终端外观" Click="TerminalAppearance_Click" Margin="0" />
 
                 <Grid x:Name="PasswordPanel" Grid.Row="2" Grid.Column="0" Grid.ColumnSpan="4" Margin="0,8,0,0">
                     <Grid.ColumnDefinitions>
@@ -165,7 +167,7 @@
                     <PasswordBox x:Name="PrivateKeyPassphraseInput" Grid.Column="4" ToolTip="私钥口令（可选；仅在勾选保存并连接成功后加密保存）" Margin="0" />
                 </Grid>
 
-                <CheckBox x:Name="SaveConnectionCheckBox" Grid.Row="2" Grid.Column="4" Grid.ColumnSpan="3"
+                <CheckBox x:Name="SaveConnectionCheckBox" Grid.Row="2" Grid.Column="4" Grid.ColumnSpan="4"
                           Content="保存至本地连接" Foreground="#D1D5DB" VerticalAlignment="Center"
                           Margin="8,8,0,0" IsChecked="True" />
             </Grid>

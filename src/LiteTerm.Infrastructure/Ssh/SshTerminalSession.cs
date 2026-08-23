@@ -40,7 +40,7 @@ public sealed class SshTerminalSession : ISshTerminalSession
             SetState(ConnectionState.Connecting);
             DisposeConnection();
 
-            var connectionInfo = CreateConnectionInfo(options);
+            var connectionInfo = SshConnectionInfoFactory.Create(options);
             var client = new SshClient(connectionInfo)
             {
                 KeepAliveInterval = options.KeepAliveInterval
@@ -166,32 +166,6 @@ public sealed class SshTerminalSession : ISshTerminalSession
         await DisconnectAsync().ConfigureAwait(false);
         _disposed = true;
         _lifecycleLock.Dispose();
-    }
-
-    private static ConnectionInfo CreateConnectionInfo(SshConnectionOptions options)
-    {
-        AuthenticationMethod authentication = options.AuthenticationType switch
-        {
-            SshAuthenticationType.Password => new PasswordAuthenticationMethod(
-                options.Username,
-                options.Password ?? string.Empty),
-            SshAuthenticationType.PrivateKey => new PrivateKeyAuthenticationMethod(
-                options.Username,
-                CreatePrivateKeyFile(options)),
-            _ => throw new ArgumentOutOfRangeException(nameof(options.AuthenticationType))
-        };
-
-        return new ConnectionInfo(options.Host, options.Port, options.Username, authentication)
-        {
-            Timeout = options.ConnectTimeout
-        };
-    }
-
-    private static PrivateKeyFile CreatePrivateKeyFile(SshConnectionOptions options)
-    {
-        return string.IsNullOrEmpty(options.PrivateKeyPassphrase)
-            ? new PrivateKeyFile(options.PrivateKeyPath!)
-            : new PrivateKeyFile(options.PrivateKeyPath!, options.PrivateKeyPassphrase);
     }
 
     private static void CancelConnectingClient(SshClient client)
