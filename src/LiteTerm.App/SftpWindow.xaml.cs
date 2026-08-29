@@ -722,7 +722,9 @@ public partial class SftpWindow : Window
             _transferCancellation?.Dispose();
             _lifetimeCancellation.Dispose();
             _shutdownCompleted = true;
-            Close();
+            // Let the current Closing callback return before requesting the final close.
+            // WPF rejects a re-entrant Close while the original close is still unwinding.
+            _ = Dispatcher.BeginInvoke(Close);
         }
     }
 }

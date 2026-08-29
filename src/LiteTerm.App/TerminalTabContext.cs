@@ -17,12 +17,14 @@ internal sealed class TerminalTabContext : IAsyncDisposable
     private readonly List<SftpWindow> _sftpWindows = [];
     private readonly TaskCompletionSource _terminalReadyCompletion = new(
         TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly CancellationTokenSource _lifetimeCancellation = new();
     private int _disposed;
 
     public TerminalTabContext(ISshTerminalSession session, WebView2 webView, Dispatcher dispatcher)
     {
         Session = session;
         WebView = webView;
+        LifetimeToken = _lifetimeCancellation.Token;
         OutputBuffer = new BoundedTerminalOutputBuffer(1024 * 1024);
         _outputTimer = new DispatcherTimer(
             TimeSpan.FromMilliseconds(16),
@@ -34,6 +36,7 @@ internal sealed class TerminalTabContext : IAsyncDisposable
 
     public ISshTerminalSession Session { get; }
     public WebView2 WebView { get; }
+    public CancellationToken LifetimeToken { get; }
     public BoundedTerminalOutputBuffer OutputBuffer { get; }
     public CancellationTokenSource? ConnectionCancellation { get; set; }
     public SshConnectionOptions? ActiveConnectionOptions { get; set; }
@@ -113,6 +116,7 @@ internal sealed class TerminalTabContext : IAsyncDisposable
         }
 
         CancelConnection();
+        _lifetimeCancellation.Cancel();
         _terminalReadyCompletion.TrySetCanceled();
         _outputTimer.Stop();
         try
@@ -125,6 +129,7 @@ internal sealed class TerminalTabContext : IAsyncDisposable
         {
             ConnectionCancellation?.Dispose();
             ConnectionCancellation = null;
+            _lifetimeCancellation.Dispose();
             WebView.Dispose();
         }
     }

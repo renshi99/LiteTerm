@@ -58,6 +58,48 @@ public sealed class SshTerminalSessionIntegrationTests
         Assert.Equal(ConnectionState.Disconnected, session.State);
     }
 
+    [SshIntegrationFact]
+    public async Task SendAsync_WhenCancelled_LeavesConnectedSessionUsable()
+    {
+        var host = Environment.GetEnvironmentVariable("LITETERM_TEST_SSH_HOST");
+        var username = Environment.GetEnvironmentVariable("LITETERM_TEST_SSH_USERNAME");
+        var password = Environment.GetEnvironmentVariable("LITETERM_TEST_SSH_PASSWORD");
+        var marker = $"LITETERM-SEND-CANCEL-{Guid.NewGuid():N}";
+        var outputReceived = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        await using var session = new SshTerminalSession();
+        session.OutputReceived += (_, eventArgs) =>
+        {
+            if (Encoding.UTF8.GetString(eventArgs.Data.Span).Contains(marker, StringComparison.Ordinal))
+            {
+                outputReceived.TrySetResult();
+            }
+        };
+
+        using var operationCancellation = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        await session.ConnectAsync(
+            new SshConnectionOptions
+            {
+                Host = host!,
+                Username = username!,
+                Password = password!
+            },
+            _ => true,
+            columns: 80,
+            rows: 24,
+            operationCancellation.Token);
+
+        using var sendCancellation = new CancellationTokenSource();
+        sendCancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+            await session.SendAsync("cancelled-write\n", sendCancellation.Token));
+        Assert.Equal(ConnectionState.Connected, session.State);
+
+        await session.SendAsync($"printf '{marker}\\n'\n", operationCancellation.Token);
+        await outputReceived.Task.WaitAsync(TimeSpan.FromSeconds(15), operationCancellation.Token);
+        Assert.Equal(ConnectionState.Connected, session.State);
+    }
+
     [SshStressIntegrationFact]
     public async Task ConnectAndDispose_Repeatedly_ExchangesDataEveryTime()
     {

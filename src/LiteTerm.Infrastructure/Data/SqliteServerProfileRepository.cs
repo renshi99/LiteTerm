@@ -15,10 +15,11 @@ namespace LiteTerm.Infrastructure.Data;
 public sealed class SqliteServerProfileRepository :
     IServerProfileRepository,
     IKnownHostStore,
-    ITerminalAppearanceSettingsStore
+    IApplicationAppearanceSettingsStore
 {
     private const int CurrentSchemaVersion = 3;
     private const string TerminalAppearanceSettingKey = "terminal.appearance";
+    private const string ApplicationThemeSettingKey = "application.theme";
     private const string UpsertProfileSql = """
         INSERT INTO server_profile (
             id, name, group_name, host, port, username, auth_type, private_key_path,
@@ -342,6 +343,79 @@ public sealed class SqliteServerProfileRepository :
             """;
         command.Parameters.AddWithValue("$key", TerminalAppearanceSettingKey);
         command.Parameters.AddWithValue("$value", JsonSerializer.Serialize(normalizedSettings));
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<ApplicationTheme> GetApplicationThemeAsync(CancellationToken cancellationToken = default)
+    {
+        await InitializeAsync(cancellationToken).ConfigureAwait(false);
+        await using var connection = await OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT value FROM app_setting WHERE key = $key;";
+        command.Parameters.AddWithValue("$key", ApplicationThemeSettingKey);
+        var value = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) as string;
+        if (value is null)
+        {
+            return ApplicationTheme.Dark;
+        }
+
+        if (!Enum.TryParse<ApplicationTheme>(value, ignoreCase: false, out var theme)
+            || !Enum.IsDefined(theme))
+        {
+            throw new InvalidDataException("应用主题设置格式无效。");
+        }
+
+        return theme;
+    }
+
+    public async Task SaveApplicationAppearanceAsync(
+        ApplicationTheme applicationTheme,
+        TerminalAppearanceSettings terminalAppearance,
+        CancellationToken cancellationToken = default)
+    {
+        if (!Enum.IsDefined(applicationTheme))
+        {
+            throw new ArgumentOutOfRangeException(nameof(applicationTheme), "应用主题无效。");
+        }
+
+        ArgumentNullException.ThrowIfNull(terminalAppearance);
+        var normalizedTerminalAppearance = terminalAppearance.Normalize();
+        await InitializeAsync(cancellationToken).ConfigureAwait(false);
+        await using var connection = await OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        await UpsertAppSettingAsync(
+            connection,
+            transaction,
+            ApplicationThemeSettingKey,
+            applicationTheme.ToString(),
+            cancellationToken).ConfigureAwait(false);
+        await UpsertAppSettingAsync(
+            connection,
+            transaction,
+            TerminalAppearanceSettingKey,
+            JsonSerializer.Serialize(normalizedTerminalAppearance),
+            cancellationToken).ConfigureAwait(false);
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task UpsertAppSettingAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string key,
+        string value,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            INSERT INTO app_setting (key, value)
+            VALUES ($key, $value)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value;
+            """;
+        command.Parameters.AddWithValue("$key", key);
+        command.Parameters.AddWithValue("$value", value);
         await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 

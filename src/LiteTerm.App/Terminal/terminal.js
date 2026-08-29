@@ -8,6 +8,7 @@
     fontSize: 14,
     lineHeight: 1.15,
     scrollback: 5000,
+    minimumContrastRatio: 4.5,
     convertEol: false,
     allowProposedApi: false,
     theme: {
@@ -155,14 +156,30 @@
 
     if (message.type === 'appearance'
       && /^#[0-9a-f]{6}$/i.test(message.foreground)
-      && /^#[0-9a-f]{6}$/i.test(message.background)) {
+      && /^#[0-9a-f]{6}$/i.test(message.background)
+      && typeof message.fontFamily === 'string'
+      && message.fontFamily.trim().length > 0
+      && message.fontFamily.length <= 128
+      && !/[\u0000-\u001f\u007f]/.test(message.fontFamily)
+      && Number.isInteger(message.fontSize)
+      && message.fontSize >= 8
+      && message.fontSize <= 32
+      && Number.isInteger(message.scrollback)
+      && message.scrollback >= 100
+      && message.scrollback <= 100000) {
       terminal.options.theme = {
         ...terminal.options.theme,
         foreground: message.foreground,
         background: message.background,
         cursor: message.foreground
       };
+      terminal.options.fontFamily = message.fontFamily;
+      terminal.options.fontSize = message.fontSize;
+      terminal.options.scrollback = message.scrollback;
       document.documentElement.style.setProperty('--terminal-background', message.background);
+      terminal.clearTextureAtlas();
+      terminal.refresh(0, terminal.rows - 1);
+      fit();
       return;
     }
 

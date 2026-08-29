@@ -184,19 +184,74 @@ public sealed class SqliteServerProfileRepositoryTests : IDisposable
     }
 
     [Fact]
-    public async Task TerminalAppearance_UsesDefaultsAndPersistsNormalizedCustomColors()
+    public async Task TerminalAppearance_UsesDefaultsAndPersistsNormalizedSettings()
     {
         var databasePath = Path.Combine(_directory, "liteterm.db");
         var firstRepository = new SqliteServerProfileRepository(databasePath, new TestSecretProtector());
 
         Assert.Equal(TerminalAppearanceSettings.Default, await firstRepository.GetTerminalAppearanceAsync());
 
-        await firstRepository.SaveTerminalAppearanceAsync(new TerminalAppearanceSettings("#abcdef", "#102030"));
+        await firstRepository.SaveTerminalAppearanceAsync(new TerminalAppearanceSettings(
+            "#abcdef",
+            "#102030",
+            "  Consolas, monospace  ",
+            18,
+            20000));
         var secondRepository = new SqliteServerProfileRepository(databasePath, new TestSecretProtector());
 
         Assert.Equal(
-            new TerminalAppearanceSettings("#ABCDEF", "#102030"),
+            new TerminalAppearanceSettings("#ABCDEF", "#102030", "Consolas, monospace", 18, 20000),
             await secondRepository.GetTerminalAppearanceAsync());
+    }
+
+    [Fact]
+    public async Task TerminalAppearance_LoadsLegacyColorOnlyJsonWithNewDefaults()
+    {
+        var databasePath = Path.Combine(_directory, "liteterm.db");
+        var repository = new SqliteServerProfileRepository(databasePath, new TestSecretProtector());
+        await repository.InitializeAsync();
+
+        var connectionString = new SqliteConnectionStringBuilder { DataSource = databasePath, Pooling = false }.ToString();
+        await using (var connection = new SqliteConnection(connectionString))
+        {
+            await connection.OpenAsync();
+            await using var command = connection.CreateCommand();
+            command.CommandText = "INSERT INTO app_setting (key, value) VALUES ($key, $value);";
+            command.Parameters.AddWithValue("$key", "terminal.appearance");
+            command.Parameters.AddWithValue(
+                "$value",
+                "{\"ForegroundColor\":\"#abcdef\",\"BackgroundColor\":\"#102030\"}");
+            await command.ExecuteNonQueryAsync();
+        }
+
+        Assert.Equal(
+            TerminalAppearanceSettings.Default with
+            {
+                ForegroundColor = "#ABCDEF",
+                BackgroundColor = "#102030"
+            },
+            await repository.GetTerminalAppearanceAsync());
+    }
+
+    [Fact]
+    public async Task ApplicationAppearance_UsesDarkDefaultAndPersistsThemeAndTerminalSettingsTogether()
+    {
+        var databasePath = Path.Combine(_directory, "liteterm.db");
+        var firstRepository = new SqliteServerProfileRepository(databasePath, new TestSecretProtector());
+
+        Assert.Equal(ApplicationTheme.Dark, await firstRepository.GetApplicationThemeAsync());
+
+        var terminalAppearance = new TerminalAppearanceSettings(
+            "#102030",
+            "#F0F0F0",
+            "Consolas, monospace",
+            17,
+            15000);
+        await firstRepository.SaveApplicationAppearanceAsync(ApplicationTheme.Light, terminalAppearance);
+
+        var secondRepository = new SqliteServerProfileRepository(databasePath, new TestSecretProtector());
+        Assert.Equal(ApplicationTheme.Light, await secondRepository.GetApplicationThemeAsync());
+        Assert.Equal(terminalAppearance, await secondRepository.GetTerminalAppearanceAsync());
     }
 
     public void Dispose()

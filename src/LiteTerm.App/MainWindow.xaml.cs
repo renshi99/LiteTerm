@@ -23,11 +23,12 @@ public partial class MainWindow : Window
     private readonly Func<ISshTerminalSession> _sshSessionFactory;
     private readonly IServerProfileRepository _dataStore;
     private readonly IKnownHostStore _knownHostStore;
-    private readonly ITerminalAppearanceSettingsStore _terminalAppearanceStore;
+    private readonly IApplicationAppearanceSettingsStore _appearanceSettingsStore;
     private readonly Func<ISftpSession> _sftpSessionFactory;
     private readonly List<TerminalTabContext> _terminalTabs = [];
     private readonly ObservableCollection<ServerProfile> _serverProfiles = [];
     private readonly ICollectionView _serverProfilesView;
+    private ApplicationTheme _applicationTheme = ApplicationTheme.Dark;
     private TerminalAppearanceSettings _terminalAppearance = TerminalAppearanceSettings.Default;
     private bool _shutdownStarted;
     private bool _shutdownCompleted;
@@ -40,18 +41,18 @@ public partial class MainWindow : Window
         Func<ISshTerminalSession> sshSessionFactory,
         IServerProfileRepository dataStore,
         IKnownHostStore knownHostStore,
-        ITerminalAppearanceSettingsStore terminalAppearanceStore,
+        IApplicationAppearanceSettingsStore appearanceSettingsStore,
         Func<ISftpSession> sftpSessionFactory)
     {
         ArgumentNullException.ThrowIfNull(sshSessionFactory);
         ArgumentNullException.ThrowIfNull(dataStore);
         ArgumentNullException.ThrowIfNull(knownHostStore);
-        ArgumentNullException.ThrowIfNull(terminalAppearanceStore);
+        ArgumentNullException.ThrowIfNull(appearanceSettingsStore);
         ArgumentNullException.ThrowIfNull(sftpSessionFactory);
         _sshSessionFactory = sshSessionFactory;
         _dataStore = dataStore;
         _knownHostStore = knownHostStore;
-        _terminalAppearanceStore = terminalAppearanceStore;
+        _appearanceSettingsStore = appearanceSettingsStore;
         _sftpSessionFactory = sftpSessionFactory;
 
         InitializeComponent();
@@ -72,7 +73,9 @@ public partial class MainWindow : Window
         try
         {
             await _dataStore.InitializeAsync();
-            _terminalAppearance = await _terminalAppearanceStore.GetTerminalAppearanceAsync();
+            _applicationTheme = await _appearanceSettingsStore.GetApplicationThemeAsync();
+            _terminalAppearance = await _appearanceSettingsStore.GetTerminalAppearanceAsync();
+            ApplicationThemeManager.Apply(_applicationTheme);
             await RefreshServerProfilesAsync();
             UpdateTerminalHostBackground();
         }
@@ -174,21 +177,38 @@ public partial class MainWindow : Window
                 tab.Columns,
                 tab.Rows,
                 connectionCancellation.Token);
+
+            if (connectionCancellation.IsCancellationRequested || !_terminalTabs.Contains(tab))
+            {
+                await tab.Session.DisconnectAsync();
+                return;
+            }
+
             tab.WebView.Focus();
             tab.ActiveConnectionOptions = options;
             connected = true;
         }
         catch (OperationCanceledException) when (connectionCancellation.IsCancellationRequested)
         {
-            SetStatus("已取消连接", "#9CA3AF");
-            SetConnectionControls(true);
+            if (ReferenceEquals(tab, CurrentTab))
+            {
+                SetStatus("已取消连接", "#9CA3AF");
+                SetConnectionControls(true);
+            }
         }
         catch (Exception)
         {
-            SetConnectionControls(true);
-            MessageBox.Show(this,
-                "无法建立 SSH 连接。请检查主机、端口、网络状态和认证信息后重试。",
-                "连接失败", MessageBoxButton.OK, MessageBoxImage.Error);
+            if (_terminalTabs.Contains(tab))
+            {
+                if (ReferenceEquals(tab, CurrentTab))
+                {
+                    SetConnectionControls(true);
+                }
+
+                MessageBox.Show(this,
+                    "无法建立 SSH 连接。请检查主机、端口、网络状态和认证信息后重试。",
+                    "连接失败", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
         }
         finally
         {
@@ -574,13 +594,24 @@ public partial class MainWindow : Window
 
     private async Task SendTerminalInputAsync(TerminalTabContext tab, string input)
     {
+        var cancellationToken = tab.LifetimeToken;
         try
         {
-            await tab.Session.SendAsync(input);
+            await tab.Session.SendAsync(input, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // Closing the owning tab cancels pending terminal writes without changing another tab's status.
         }
         catch (Exception)
         {
-            await Dispatcher.InvokeAsync(() => SetStatus("终端输入发送失败，连接可能已中断。", "#EF4444"));
+            await Dispatcher.InvokeAsync(() =>
+            {
+                if (_terminalTabs.Contains(tab) && ReferenceEquals(tab, CurrentTab))
+                {
+                    SetStatus("终端输入发送失败，连接可能已中断。", "#EF4444");
+                }
+            });
         }
     }
 
@@ -607,7 +638,7 @@ public partial class MainWindow : Window
 
     private async void TerminalAppearance_Click(object sender, RoutedEventArgs e)
     {
-        var dialog = new TerminalAppearanceWindow(_terminalAppearance)
+        var dialog = new TerminalAppearanceWindow(_applicationTheme, _terminalAppearance)
         {
             Owner = this
         };
@@ -618,8 +649,10 @@ public partial class MainWindow : Window
 
         try
         {
-            await _terminalAppearanceStore.SaveTerminalAppearanceAsync(dialog.Settings);
+            await _appearanceSettingsStore.SaveApplicationAppearanceAsync(dialog.SelectedApplicationTheme, dialog.Settings);
+            _applicationTheme = dialog.SelectedApplicationTheme;
             _terminalAppearance = dialog.Settings;
+            ApplicationThemeManager.Apply(_applicationTheme);
             UpdateTerminalHostBackground();
             foreach (var tab in _terminalTabs)
             {
@@ -930,7 +963,10 @@ public partial class MainWindow : Window
         {
             type = "appearance",
             foreground = _terminalAppearance.ForegroundColor,
-            background = _terminalAppearance.BackgroundColor
+            background = _terminalAppearance.BackgroundColor,
+            fontFamily = _terminalAppearance.FontFamily,
+            fontSize = _terminalAppearance.FontSize,
+            scrollback = _terminalAppearance.Scrollback
         }));
     }
 
@@ -1073,7 +1109,8 @@ public partial class MainWindow : Window
         finally
         {
             _shutdownCompleted = true;
-            Close();
+            // Complete the intercepted close after this asynchronous Closing callback returns.
+            _ = Dispatcher.BeginInvoke(Close);
         }
     }
 }

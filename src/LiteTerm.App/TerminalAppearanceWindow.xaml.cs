@@ -17,18 +17,33 @@ public partial class TerminalAppearanceWindow : Window
 
     private bool _updatingControls;
 
-    public TerminalAppearanceWindow(TerminalAppearanceSettings currentSettings)
+    public TerminalAppearanceWindow(
+        ApplicationTheme applicationTheme,
+        TerminalAppearanceSettings currentSettings)
     {
+        if (!Enum.IsDefined(applicationTheme))
+        {
+            throw new ArgumentOutOfRangeException(nameof(applicationTheme));
+        }
+
         ArgumentNullException.ThrowIfNull(currentSettings);
+        SelectedApplicationTheme = applicationTheme;
         Settings = currentSettings.Normalize();
         InitializeComponent();
+        DarkThemeRadioButton.IsChecked = applicationTheme == ApplicationTheme.Dark;
+        LightThemeRadioButton.IsChecked = applicationTheme == ApplicationTheme.Light;
         ForegroundTextBox.Text = Settings.ForegroundColor;
         BackgroundTextBox.Text = Settings.BackgroundColor;
+        FontFamilyTextBox.Text = Settings.FontFamily;
+        FontSizeTextBox.Text = Settings.FontSize.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        ScrollbackTextBox.Text = Settings.Scrollback.ToString(System.Globalization.CultureInfo.InvariantCulture);
         SelectMatchingPreset();
         UpdatePreview();
     }
 
     public TerminalAppearanceSettings Settings { get; private set; }
+
+    public ApplicationTheme SelectedApplicationTheme { get; private set; }
 
     private void Preset_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
@@ -61,6 +76,10 @@ public partial class TerminalAppearanceWindow : Window
         _updatingControls = true;
         ForegroundTextBox.Text = TerminalAppearanceSettings.Default.ForegroundColor;
         BackgroundTextBox.Text = TerminalAppearanceSettings.Default.BackgroundColor;
+        FontFamilyTextBox.Text = TerminalAppearanceSettings.Default.FontFamily;
+        FontSizeTextBox.Text = TerminalAppearanceSettings.Default.FontSize.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        ScrollbackTextBox.Text = TerminalAppearanceSettings.Default.Scrollback.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        DarkThemeRadioButton.IsChecked = true;
         PresetComboBox.SelectedIndex = 0;
         _updatingControls = false;
         UpdatePreview();
@@ -80,15 +99,31 @@ public partial class TerminalAppearanceWindow : Window
     {
         try
         {
+            SelectedApplicationTheme = LightThemeRadioButton.IsChecked == true
+                ? ApplicationTheme.Light
+                : ApplicationTheme.Dark;
             Settings = new TerminalAppearanceSettings(
                 ForegroundTextBox.Text.Trim(),
-                BackgroundTextBox.Text.Trim()).Normalize();
+                BackgroundTextBox.Text.Trim(),
+                FontFamilyTextBox.Text.Trim(),
+                ParseInteger(FontSizeTextBox.Text, "终端字号"),
+                ParseInteger(ScrollbackTextBox.Text, "终端滚动行数")).Normalize();
             DialogResult = true;
         }
         catch (ArgumentException exception)
         {
             MessageBox.Show(this, exception.Message, "终端外观", MessageBoxButton.OK, MessageBoxImage.Warning);
         }
+    }
+
+    private void DisplaySetting_TextChanged(object sender, TextChangedEventArgs e)
+    {
+        if (_updatingControls)
+        {
+            return;
+        }
+
+        UpdatePreview();
     }
 
     private void SelectMatchingPreset()
@@ -116,6 +151,27 @@ public partial class TerminalAppearanceWindow : Window
         PreviewText.Foreground = foreground;
         ForegroundSwatch.Background = foreground;
         BackgroundSwatch.Background = background;
+
+        if (!string.IsNullOrWhiteSpace(FontFamilyTextBox.Text))
+        {
+            PreviewText.FontFamily = new FontFamily(FontFamilyTextBox.Text.Trim());
+        }
+
+        if (int.TryParse(FontSizeTextBox.Text, out var fontSize)
+            && fontSize is >= TerminalAppearanceSettings.MinimumFontSize and <= TerminalAppearanceSettings.MaximumFontSize)
+        {
+            PreviewText.FontSize = fontSize;
+        }
+    }
+
+    private static int ParseInteger(string value, string displayName)
+    {
+        if (!int.TryParse(value.Trim(), out var result))
+        {
+            throw new ArgumentException($"{displayName}必须是整数。");
+        }
+
+        return result;
     }
 
     private void ChooseColor(System.Windows.Controls.TextBox targetTextBox)

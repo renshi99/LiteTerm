@@ -57,11 +57,7 @@ public sealed class SshTerminalSession : ISshTerminalSession
             };
 
             _client = client;
-            using var cancellationRegistration = cancellationToken.Register(
-                static state => CancelConnectingClient((SshClient)state!),
-                client);
-            await Task.Run(client.Connect, CancellationToken.None).ConfigureAwait(false);
-            cancellationToken.ThrowIfCancellationRequested();
+            await client.ConnectAsync(cancellationToken).ConfigureAwait(false);
 
             var shell = client.CreateShellStream(
                 "xterm-256color",
@@ -166,19 +162,6 @@ public sealed class SshTerminalSession : ISshTerminalSession
         await DisconnectAsync().ConfigureAwait(false);
         _disposed = true;
         _lifecycleLock.Dispose();
-    }
-
-    private static void CancelConnectingClient(SshClient client)
-    {
-        // Dispose closes the underlying transport when Connect is still synchronously waiting on the network.
-        try
-        {
-            client.Dispose();
-        }
-        catch
-        {
-            // Cancellation is best effort; ConnectAsync performs the remaining cleanup path.
-        }
     }
 
     private void OnShellDataReceived(object? sender, ShellDataEventArgs eventArgs)

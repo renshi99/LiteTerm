@@ -4,7 +4,8 @@
         xmlns:local="clr-namespace:LiteTerm.App"
         xmlns:wv2="clr-namespace:Microsoft.Web.WebView2.Wpf;assembly=Microsoft.Web.WebView2.Wpf"
         Title="LiteTerm" Height="720" Width="1280" MinHeight="520" MinWidth="1050"
-        WindowStartupLocation="CenterScreen" Background="#111827"
+        WindowStartupLocation="CenterScreen" Background="{DynamicResource WindowBackgroundBrush}"
+        Foreground="{DynamicResource PrimaryTextBrush}"
         PreviewKeyDown="MainWindow_PreviewKeyDown">
     <Window.Resources>
         <local:LastConnectedAtConverter x:Key="LastConnectedAtConverter" />
@@ -39,7 +40,8 @@
             <RowDefinition Height="28" />
         </Grid.RowDefinitions>
 
-        <Border Grid.RowSpan="3" Background="#111827" BorderBrush="#374151" BorderThickness="0,0,1,0">
+        <Border Grid.RowSpan="3" Background="{DynamicResource WindowBackgroundBrush}"
+                BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,1,0">
             <Grid Margin="12">
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto" />
@@ -48,7 +50,8 @@
                     <RowDefinition Height="*" />
                     <RowDefinition Height="Auto" />
                 </Grid.RowDefinitions>
-                <TextBlock Text="已保存的服务器" Foreground="#F3F4F6" FontSize="16" FontWeight="SemiBold" Margin="2,2,0,10" />
+                <TextBlock Text="已保存的服务器" Foreground="{DynamicResource PrimaryTextBrush}"
+                           FontSize="16" FontWeight="SemiBold" Margin="2,2,0,10" />
                 <Grid Grid.Row="1" Margin="0,0,0,10">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="*" />
@@ -57,13 +60,13 @@
                     <TextBox x:Name="ServerSearchTextBox" Height="32" Margin="0" Padding="28,4,8,4"
                              ToolTip="按名称、分组、主机或用户名搜索"
                              TextChanged="ServerSearchTextBox_TextChanged" />
-                    <TextBlock Text="⌕" Foreground="#6B7280" FontSize="17" Margin="8,0,0,1"
+                    <TextBlock Text="⌕" Foreground="{DynamicResource MutedTextBrush}" FontSize="17" Margin="8,0,0,1"
                                VerticalAlignment="Center" IsHitTestVisible="False" />
-                    <TextBlock x:Name="ServerCountText" Grid.Column="1" Foreground="#9CA3AF" FontSize="11"
+                    <TextBlock x:Name="ServerCountText" Grid.Column="1" Foreground="{DynamicResource MutedTextBrush}" FontSize="11"
                                VerticalAlignment="Center" Margin="8,0,2,0" />
                 </Grid>
                 <DockPanel Grid.Row="2" Margin="0,0,0,8">
-                    <TextBlock Text="排序" Foreground="#9CA3AF" FontSize="11" VerticalAlignment="Center"
+                    <TextBlock Text="排序" Foreground="{DynamicResource MutedTextBrush}" FontSize="11" VerticalAlignment="Center"
                                Margin="2,0,8,0" />
                     <ComboBox x:Name="ServerSortComboBox" Height="28" SelectedIndex="0"
                               SelectionChanged="ServerSortComboBox_SelectionChanged">
@@ -71,14 +74,15 @@
                         <ComboBoxItem Content="组内按最近连接" Tag="Recent" />
                     </ComboBox>
                 </DockPanel>
-                <ListBox x:Name="ServerList" Grid.Row="3" Background="#0F172A" Foreground="#E5E7EB"
-                         BorderBrush="#374151" MouseDoubleClick="ServerList_MouseDoubleClick">
+                <ListBox x:Name="ServerList" Grid.Row="3" Background="{DynamicResource ListBackgroundBrush}"
+                         Foreground="{DynamicResource PrimaryTextBrush}" BorderBrush="{DynamicResource BorderBrush}"
+                         MouseDoubleClick="ServerList_MouseDoubleClick">
                     <ListBox.GroupStyle>
                         <GroupStyle>
                             <GroupStyle.HeaderTemplate>
                                 <DataTemplate>
-                                    <Border Background="#172033" Padding="8,5" Margin="0,5,0,1">
-                                        <TextBlock Text="{Binding Name}" Foreground="#93C5FD" FontSize="11"
+                                    <Border Background="{DynamicResource AlternateBackgroundBrush}" Padding="8,5" Margin="0,5,0,1">
+                                        <TextBlock Text="{Binding Name}" Foreground="{DynamicResource AccentTextBrush}" FontSize="11"
                                                    FontWeight="SemiBold" />
                                     </Border>
                                 </DataTemplate>
@@ -89,11 +93,11 @@
                         <DataTemplate>
                             <StackPanel Margin="5,4">
                                 <TextBlock Text="{Binding Name}" FontWeight="SemiBold" />
-                                <TextBlock Foreground="#9CA3AF" FontSize="11">
+                                <TextBlock Foreground="{DynamicResource MutedTextBrush}" FontSize="11">
                                     <Run Text="{Binding Username}" /><Run Text="@" /><Run Text="{Binding Host}" />
                                 </TextBlock>
                                 <TextBlock Text="{Binding LastConnectedAt, Converter={StaticResource LastConnectedAtConverter}}"
-                                           Foreground="#64748B" FontSize="11" />
+                                           Foreground="{DynamicResource DimTextBrush}" FontSize="11" />
                             </StackPanel>
                         </DataTemplate>
                     </ListBox.ItemTemplate>
@@ -108,7 +112,8 @@
             </Grid>
         </Border>
 
-        <Border Grid.Row="0" Grid.Column="1" Background="#1F2937" Padding="14,8" BorderBrush="#374151" BorderThickness="0,0,0,1">
+        <Border Grid.Row="0" Grid.Column="1" Background="{DynamicResource PanelBackgroundBrush}" Padding="14,8"
+                BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,0,1">
             <Grid>
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto" />
@@ -127,10 +132,10 @@
                     <ColumnDefinition Width="Auto" />
                 </Grid.ColumnDefinitions>
 
-                <TextBlock Grid.Row="0" Grid.Column="0" Text="主机 / IP" Foreground="#9CA3AF" FontSize="11" Margin="2,0,0,3" />
-                <TextBlock Grid.Row="0" Grid.Column="1" Text="端口" Foreground="#9CA3AF" FontSize="11" Margin="2,0,0,3" />
-                <TextBlock Grid.Row="0" Grid.Column="2" Text="用户名" Foreground="#9CA3AF" FontSize="11" Margin="2,0,0,3" />
-                <TextBlock Grid.Row="0" Grid.Column="3" Text="认证方式" Foreground="#9CA3AF" FontSize="11" Margin="2,0,0,3" />
+                <TextBlock Grid.Row="0" Grid.Column="0" Text="主机 / IP" Foreground="{DynamicResource MutedTextBrush}" FontSize="11" Margin="2,0,0,3" />
+                <TextBlock Grid.Row="0" Grid.Column="1" Text="端口" Foreground="{DynamicResource MutedTextBrush}" FontSize="11" Margin="2,0,0,3" />
+                <TextBlock Grid.Row="0" Grid.Column="2" Text="用户名" Foreground="{DynamicResource MutedTextBrush}" FontSize="11" Margin="2,0,0,3" />
+                <TextBlock Grid.Row="0" Grid.Column="3" Text="认证方式" Foreground="{DynamicResource MutedTextBrush}" FontSize="11" Margin="2,0,0,3" />
 
                 <TextBox x:Name="HostTextBox" Grid.Row="1" Grid.Column="0" ToolTip="主机或 IP" />
                 <TextBox x:Name="PortTextBox" Grid.Row="1" Grid.Column="1" Text="22" ToolTip="端口" />
@@ -145,14 +150,14 @@
                 <Button x:Name="SftpButton" Grid.Row="1" Grid.Column="6" Content="SFTP" Click="Sftp_Click" IsEnabled="False" />
                 <Button Grid.Row="1" Grid.Column="7" Content="新建标签" Click="NewTerminalTab_Click"
                         ToolTip="新建终端标签 (Ctrl+Shift+T)" />
-                <Button Grid.Row="1" Grid.Column="8" Content="终端外观" Click="TerminalAppearance_Click" Margin="0" />
+                <Button Grid.Row="1" Grid.Column="8" Content="外观设置" Click="TerminalAppearance_Click" Margin="0" />
 
                 <Grid x:Name="PasswordPanel" Grid.Row="2" Grid.Column="0" Grid.ColumnSpan="4" Margin="0,8,0,0">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="180" />
                         <ColumnDefinition Width="*" />
                     </Grid.ColumnDefinitions>
-                    <TextBlock Text="密码" Foreground="#9CA3AF" VerticalAlignment="Center" Margin="2,0,12,0" />
+                    <TextBlock Text="密码" Foreground="{DynamicResource MutedTextBrush}" VerticalAlignment="Center" Margin="2,0,12,0" />
                     <PasswordBox x:Name="PasswordInput" Grid.Column="1" ToolTip="仅在勾选保存并连接成功后加密保存" Margin="0" />
                 </Grid>
 
@@ -164,15 +169,15 @@
                         <ColumnDefinition Width="92" />
                         <ColumnDefinition Width="210" />
                     </Grid.ColumnDefinitions>
-                    <TextBlock Text="私钥文件" Foreground="#9CA3AF" VerticalAlignment="Center" Margin="2,0,12,0" />
+                    <TextBlock Text="私钥文件" Foreground="{DynamicResource MutedTextBrush}" VerticalAlignment="Center" Margin="2,0,12,0" />
                     <TextBox x:Name="PrivateKeyPathTextBox" Grid.Column="1" ToolTip="私钥文件路径" />
                     <Button x:Name="BrowsePrivateKeyButton" Grid.Column="2" Content="浏览…" Click="BrowsePrivateKey_Click" />
-                    <TextBlock Grid.Column="3" Text="口令（可选）" Foreground="#9CA3AF" VerticalAlignment="Center" Margin="2,0,12,0" />
+                    <TextBlock Grid.Column="3" Text="口令（可选）" Foreground="{DynamicResource MutedTextBrush}" VerticalAlignment="Center" Margin="2,0,12,0" />
                     <PasswordBox x:Name="PrivateKeyPassphraseInput" Grid.Column="4" ToolTip="私钥口令（可选；仅在勾选保存并连接成功后加密保存）" Margin="0" />
                 </Grid>
 
                 <CheckBox x:Name="SaveConnectionCheckBox" Grid.Row="2" Grid.Column="4" Grid.ColumnSpan="4"
-                          Content="保存至本地连接" Foreground="#D1D5DB" VerticalAlignment="Center"
+                          Content="保存至本地连接" Foreground="{DynamicResource SecondaryTextBrush}" VerticalAlignment="Center"
                           Margin="8,8,0,0" IsChecked="True" />
             </Grid>
         </Border>
@@ -180,7 +185,8 @@
         <TabControl x:Name="TerminalTabs" Grid.Row="1" Grid.Column="1" Background="#050816"
                     BorderThickness="0" Padding="0" SelectionChanged="TerminalTabs_SelectionChanged" />
 
-        <Border Grid.Row="2" Grid.Column="1" Background="#1F2937" BorderBrush="#374151" BorderThickness="0,1,0,0">
+        <Border Grid.Row="2" Grid.Column="1" Background="{DynamicResource PanelBackgroundBrush}"
+                BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0">
             <Grid Margin="10,0">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="Auto" />
@@ -188,8 +194,10 @@
                     <ColumnDefinition Width="Auto" />
                 </Grid.ColumnDefinitions>
                 <Ellipse x:Name="StatusDot" Width="8" Height="8" Fill="#9CA3AF" VerticalAlignment="Center" />
-                <TextBlock x:Name="StatusText" Grid.Column="1" Text="正在初始化终端…" Foreground="#D1D5DB" Margin="8,0" VerticalAlignment="Center" />
-                <TextBlock x:Name="SizeText" Grid.Column="2" Text="80 × 24" Foreground="#9CA3AF" VerticalAlignment="Center" />
+                <TextBlock x:Name="StatusText" Grid.Column="1" Text="正在初始化终端…"
+                           Foreground="{DynamicResource SecondaryTextBrush}" Margin="8,0" VerticalAlignment="Center" />
+                <TextBlock x:Name="SizeText" Grid.Column="2" Text="80 × 24"
+                           Foreground="{DynamicResource MutedTextBrush}" VerticalAlignment="Center" />
             </Grid>
         </Border>
     </Grid>
