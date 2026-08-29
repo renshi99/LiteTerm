@@ -40,6 +40,7 @@ internal sealed class TerminalTabContext : IAsyncDisposable
     public BoundedTerminalOutputBuffer OutputBuffer { get; }
     public CancellationTokenSource? ConnectionCancellation { get; set; }
     public SshConnectionOptions? ActiveConnectionOptions { get; set; }
+    public Guid? ActiveServerProfileId { get; set; }
     public string DisplayName { get; set; } = "新建终端";
     public int Columns { get; set; } = 80;
     public int Rows { get; set; } = 24;

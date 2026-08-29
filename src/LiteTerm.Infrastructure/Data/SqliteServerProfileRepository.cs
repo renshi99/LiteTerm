@@ -2,6 +2,8 @@ using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using LiteTerm.Core.Connections;
+using LiteTerm.Core.Logs;
+using LiteTerm.Core.QuickCommands;
 using LiteTerm.Core.Security;
 using LiteTerm.Core.Servers;
 using LiteTerm.Core.Settings;
@@ -15,11 +17,15 @@ namespace LiteTerm.Infrastructure.Data;
 public sealed class SqliteServerProfileRepository :
     IServerProfileRepository,
     IKnownHostStore,
-    IApplicationAppearanceSettingsStore
+    IApplicationAppearanceSettingsStore,
+    IQuickCommandStore,
+    IServerLogEntryStore
 {
-    private const int CurrentSchemaVersion = 3;
+    private const int AppSettingsSchemaVersion = 3;
+    private const int CurrentSchemaVersion = 4;
     private const string TerminalAppearanceSettingKey = "terminal.appearance";
     private const string ApplicationThemeSettingKey = "application.theme";
+    private const string QuickCommandsSettingKey = "quick.commands";
     private const string UpsertProfileSql = """
         INSERT INTO server_profile (
             id, name, group_name, host, port, username, auth_type, private_key_path,
@@ -400,6 +406,124 @@ public sealed class SqliteServerProfileRepository :
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
     }
 
+    public async Task<IReadOnlyList<QuickCommandDefinition>> GetQuickCommandsAsync(
+        CancellationToken cancellationToken = default)
+    {
+        await InitializeAsync(cancellationToken).ConfigureAwait(false);
+        await using var connection = await OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT value FROM app_setting WHERE key = $key;";
+        command.Parameters.AddWithValue("$key", QuickCommandsSettingKey);
+        var value = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) as string;
+        if (value is null)
+        {
+            return QuickCommandDefinition.Defaults;
+        }
+
+        var definitions = JsonSerializer.Deserialize<List<QuickCommandDefinition>>(value)
+            ?? throw new InvalidDataException("常用命令设置格式无效。");
+        return QuickCommandDefinition.NormalizeAll(definitions);
+    }
+
+    public async Task SaveQuickCommandsAsync(
+        IReadOnlyList<QuickCommandDefinition> definitions,
+        CancellationToken cancellationToken = default)
+    {
+        var normalized = QuickCommandDefinition.NormalizeAll(definitions);
+        await InitializeAsync(cancellationToken).ConfigureAwait(false);
+        await using var connection = await OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            INSERT INTO app_setting (key, value)
+            VALUES ($key, $value)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value;
+            """;
+        command.Parameters.AddWithValue("$key", QuickCommandsSettingKey);
+        command.Parameters.AddWithValue("$value", JsonSerializer.Serialize(normalized));
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<IReadOnlyList<ServerLogEntry>> GetForServerAsync(
+        Guid serverId,
+        CancellationToken cancellationToken = default)
+    {
+        ValidateServerId(serverId);
+        await InitializeAsync(cancellationToken).ConfigureAwait(false);
+        await using var connection = await OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT id, server_id, name, remote_path
+            FROM server_log_entry
+            WHERE server_id = $serverId
+            ORDER BY name COLLATE NOCASE, id;
+            """;
+        command.Parameters.AddWithValue("$serverId", serverId.ToString("D"));
+
+        var entries = new List<ServerLogEntry>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            entries.Add(new ServerLogEntry(
+                Guid.Parse(reader.GetString(0)),
+                Guid.Parse(reader.GetString(1)),
+                reader.GetString(2),
+                reader.GetString(3)).Normalize());
+        }
+
+        return entries;
+    }
+
+    public async Task ReplaceForServerAsync(
+        Guid serverId,
+        IReadOnlyList<ServerLogEntry> entries,
+        CancellationToken cancellationToken = default)
+    {
+        var normalized = ServerLogEntry.NormalizeAll(serverId, entries);
+        await InitializeAsync(cancellationToken).ConfigureAwait(false);
+        await using var connection = await OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        await using (var serverCommand = connection.CreateCommand())
+        {
+            serverCommand.Transaction = transaction;
+            serverCommand.CommandText = "SELECT EXISTS(SELECT 1 FROM server_profile WHERE id = $serverId);";
+            serverCommand.Parameters.AddWithValue("$serverId", serverId.ToString("D"));
+            var exists = Convert.ToInt64(
+                await serverCommand.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false),
+                CultureInfo.InvariantCulture) == 1;
+            if (!exists)
+            {
+                throw new InvalidOperationException("日志入口所属的服务器资料不存在。");
+            }
+        }
+
+        await using (var deleteCommand = connection.CreateCommand())
+        {
+            deleteCommand.Transaction = transaction;
+            deleteCommand.CommandText = "DELETE FROM server_log_entry WHERE server_id = $serverId;";
+            deleteCommand.Parameters.AddWithValue("$serverId", serverId.ToString("D"));
+            await deleteCommand.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        foreach (var entry in normalized)
+        {
+            await using var insertCommand = connection.CreateCommand();
+            insertCommand.Transaction = transaction;
+            insertCommand.CommandText = """
+                INSERT INTO server_log_entry (id, server_id, name, remote_path)
+                VALUES ($id, $serverId, $name, $remotePath);
+                """;
+            insertCommand.Parameters.AddWithValue("$id", entry.Id.ToString("D"));
+            insertCommand.Parameters.AddWithValue("$serverId", entry.ServerId.ToString("D"));
+            insertCommand.Parameters.AddWithValue("$name", entry.Name);
+            insertCommand.Parameters.AddWithValue("$remotePath", entry.RemotePath);
+            await insertCommand.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
     private static async Task UpsertAppSettingAsync(
         SqliteConnection connection,
         SqliteTransaction transaction,
@@ -445,9 +569,15 @@ public sealed class SqliteServerProfileRepository :
             await RecordMigrationAsync(connection, transaction, 2, cancellationToken).ConfigureAwait(false);
         }
 
-        if (!await IsMigrationAppliedAsync(connection, transaction, CurrentSchemaVersion, cancellationToken).ConfigureAwait(false))
+        if (!await IsMigrationAppliedAsync(connection, transaction, AppSettingsSchemaVersion, cancellationToken).ConfigureAwait(false))
         {
             await ApplyAppSettingsSchemaAsync(connection, transaction, cancellationToken).ConfigureAwait(false);
+            await RecordMigrationAsync(connection, transaction, AppSettingsSchemaVersion, cancellationToken).ConfigureAwait(false);
+        }
+
+        if (!await IsMigrationAppliedAsync(connection, transaction, CurrentSchemaVersion, cancellationToken).ConfigureAwait(false))
+        {
+            await ApplyServerLogEntriesSchemaAsync(connection, transaction, cancellationToken).ConfigureAwait(false);
             await RecordMigrationAsync(connection, transaction, CurrentSchemaVersion, cancellationToken).ConfigureAwait(false);
         }
 
@@ -552,6 +682,28 @@ public sealed class SqliteServerProfileRepository :
                 key TEXT NOT NULL PRIMARY KEY,
                 value TEXT NOT NULL
             );
+            """;
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task ApplyServerLogEntriesSchemaAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            CREATE TABLE server_log_entry (
+                id TEXT NOT NULL PRIMARY KEY,
+                server_id TEXT NOT NULL,
+                name TEXT NOT NULL COLLATE NOCASE,
+                remote_path TEXT NOT NULL,
+                FOREIGN KEY (server_id) REFERENCES server_profile(id) ON DELETE CASCADE,
+                UNIQUE (server_id, name)
+            );
+
+            CREATE INDEX ix_server_log_entry_server_id ON server_log_entry(server_id);
             """;
         await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }

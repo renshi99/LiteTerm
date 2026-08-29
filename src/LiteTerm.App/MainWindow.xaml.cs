@@ -8,6 +8,8 @@ using System.Windows.Data;
 using System.Windows.Input;
 using System.Windows.Media;
 using LiteTerm.Core.Connections;
+using LiteTerm.Core.Logs;
+using LiteTerm.Core.QuickCommands;
 using LiteTerm.Core.Servers;
 using LiteTerm.Core.Settings;
 using LiteTerm.Core.Sftp;
@@ -24,6 +26,8 @@ public partial class MainWindow : Window
     private readonly IServerProfileRepository _dataStore;
     private readonly IKnownHostStore _knownHostStore;
     private readonly IApplicationAppearanceSettingsStore _appearanceSettingsStore;
+    private readonly IQuickCommandStore _quickCommandStore;
+    private readonly IServerLogEntryStore _serverLogEntryStore;
     private readonly Func<ISftpSession> _sftpSessionFactory;
     private readonly List<TerminalTabContext> _terminalTabs = [];
     private readonly ObservableCollection<ServerProfile> _serverProfiles = [];
@@ -42,17 +46,23 @@ public partial class MainWindow : Window
         IServerProfileRepository dataStore,
         IKnownHostStore knownHostStore,
         IApplicationAppearanceSettingsStore appearanceSettingsStore,
+        IQuickCommandStore quickCommandStore,
+        IServerLogEntryStore serverLogEntryStore,
         Func<ISftpSession> sftpSessionFactory)
     {
         ArgumentNullException.ThrowIfNull(sshSessionFactory);
         ArgumentNullException.ThrowIfNull(dataStore);
         ArgumentNullException.ThrowIfNull(knownHostStore);
         ArgumentNullException.ThrowIfNull(appearanceSettingsStore);
+        ArgumentNullException.ThrowIfNull(quickCommandStore);
+        ArgumentNullException.ThrowIfNull(serverLogEntryStore);
         ArgumentNullException.ThrowIfNull(sftpSessionFactory);
         _sshSessionFactory = sshSessionFactory;
         _dataStore = dataStore;
         _knownHostStore = knownHostStore;
         _appearanceSettingsStore = appearanceSettingsStore;
+        _quickCommandStore = quickCommandStore;
+        _serverLogEntryStore = serverLogEntryStore;
         _sftpSessionFactory = sftpSessionFactory;
 
         InitializeComponent();
@@ -166,6 +176,7 @@ public partial class MainWindow : Window
         var connected = false;
         tab.ConnectionCancellation = connectionCancellation;
         tab.HasConnectionHistory = true;
+        tab.ActiveServerProfileId = credentialToSave is null ? savedProfile?.Id : null;
         tab.DisplayName = savedProfile?.Name ?? $"{options.Username}@{options.Host}";
         UpdateTabHeader(tab);
         try
@@ -237,6 +248,11 @@ public partial class MainWindow : Window
                 }
 
                 await RefreshServerProfilesAsync(connectedProfile.Id);
+                tab.ActiveServerProfileId = connectedProfile.Id;
+                if (ReferenceEquals(tab, CurrentTab))
+                {
+                    SetConnectionControls(false, true);
+                }
             }
             catch (Exception)
             {
@@ -636,6 +652,98 @@ public partial class MainWindow : Window
         window.Show();
     }
 
+    private async void QuickCommands_Click(object sender, RoutedEventArgs e)
+    {
+        var tab = CurrentTab;
+        if (tab?.Session.State != ConnectionState.Connected)
+        {
+            MessageBox.Show(this, "请先建立 SSH 终端连接。", "常用命令",
+                MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        try
+        {
+            var commands = await _quickCommandStore.GetQuickCommandsAsync(tab.LifetimeToken);
+            var dialog = new QuickCommandWindow(commands) { Owner = this };
+            if (dialog.ShowDialog() != true)
+            {
+                return;
+            }
+
+            await _quickCommandStore.SaveQuickCommandsAsync(dialog.Commands, tab.LifetimeToken);
+            if (dialog.CommandToExecute is null)
+            {
+                return;
+            }
+
+            if (!_terminalTabs.Contains(tab) || tab.Session.State != ConnectionState.Connected)
+            {
+                MessageBox.Show(this, "当前终端连接已断开，命令未执行。", "常用命令",
+                    MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+
+            await SendTerminalInputAsync(tab, dialog.CommandToExecute + "\n");
+        }
+        catch (OperationCanceledException) when (tab.LifetimeToken.IsCancellationRequested)
+        {
+            // Closing the owning tab cancels settings access and prevents sending to another tab.
+        }
+        catch (Exception)
+        {
+            MessageBox.Show(this, "无法读取或保存常用命令配置。", "常用命令",
+                MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
+    private async void ServerLogs_Click(object sender, RoutedEventArgs e)
+    {
+        var tab = CurrentTab;
+        if (tab?.Session.State != ConnectionState.Connected || tab.ActiveServerProfileId is not { } serverId)
+        {
+            MessageBox.Show(this, "常用日志只能关联到已保存并已连接的服务器。", "常用日志",
+                MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        try
+        {
+            var entries = await _serverLogEntryStore.GetForServerAsync(serverId, tab.LifetimeToken);
+            var dialog = new ServerLogWindow(serverId, tab.DisplayName, entries) { Owner = this };
+            if (dialog.ShowDialog() != true)
+            {
+                return;
+            }
+
+            await _serverLogEntryStore.ReplaceForServerAsync(serverId, dialog.Entries, tab.LifetimeToken);
+            if (dialog.CommandToExecute is null)
+            {
+                return;
+            }
+
+            if (!_terminalTabs.Contains(tab)
+                || tab.Session.State != ConnectionState.Connected
+                || tab.ActiveServerProfileId != serverId)
+            {
+                MessageBox.Show(this, "当前服务器连接已断开，日志命令未执行。", "常用日志",
+                    MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+
+            await SendTerminalInputAsync(tab, dialog.CommandToExecute + "\n");
+        }
+        catch (OperationCanceledException) when (tab.LifetimeToken.IsCancellationRequested)
+        {
+            // Closing the owning tab cancels settings access and prevents sending to another tab.
+        }
+        catch (Exception)
+        {
+            MessageBox.Show(this, "无法读取或保存当前服务器的常用日志。", "常用日志",
+                MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
     private async void TerminalAppearance_Click(object sender, RoutedEventArgs e)
     {
         var dialog = new TerminalAppearanceWindow(_applicationTheme, _terminalAppearance)
@@ -708,7 +816,7 @@ public partial class MainWindow : Window
         }
 
         if (MessageBox.Show(this,
-                $"确定删除服务器“{profile.Name}”吗？保存的凭据也会一并删除。",
+                $"确定删除服务器“{profile.Name}”吗？保存的凭据和常用日志也会一并删除。",
                 "删除服务器", MessageBoxButton.YesNo, MessageBoxImage.Warning, MessageBoxResult.No) != MessageBoxResult.Yes)
         {
             return;
@@ -717,7 +825,16 @@ public partial class MainWindow : Window
         try
         {
             await _dataStore.DeleteAsync(profile.Id);
+            foreach (var tab in _terminalTabs.Where(tab => tab.ActiveServerProfileId == profile.Id))
+            {
+                tab.ActiveServerProfileId = null;
+            }
+
             await RefreshServerProfilesAsync();
+            if (CurrentTab is not null)
+            {
+                UpdateCurrentTabState(CurrentTab);
+            }
         }
         catch (Exception)
         {
@@ -1009,6 +1126,7 @@ public partial class MainWindow : Window
             if (state is ConnectionState.Disconnected or ConnectionState.Failed)
             {
                 tab.ActiveConnectionOptions = null;
+                tab.ActiveServerProfileId = null;
             }
             UpdateTabHeader(tab);
             if (!ReferenceEquals(tab, CurrentTab))
@@ -1058,6 +1176,9 @@ public partial class MainWindow : Window
         PrivateKeyPassphraseInput.IsEnabled = canConnect;
         SaveConnectionCheckBox.IsEnabled = canConnect;
         SftpButton.IsEnabled = CurrentTab?.Session.State == ConnectionState.Connected;
+        QuickCommandButton.IsEnabled = CurrentTab?.Session.State == ConnectionState.Connected;
+        LogShortcutButton.IsEnabled = CurrentTab?.Session.State == ConnectionState.Connected
+                                      && CurrentTab.ActiveServerProfileId is not null;
     }
 
     private SshAuthenticationType GetSelectedAuthenticationType()

@@ -31,6 +31,8 @@ public partial class App : System.Windows.Application
             dataStore,
             dataStore,
             dataStore,
+            dataStore,
+            dataStore,
             static () => new SftpSession());
         MainWindow.Show();
     }

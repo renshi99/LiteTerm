@@ -1,6 +1,8 @@
 using System.Text;
 using System.Text.Json;
 using LiteTerm.Core.Connections;
+using LiteTerm.Core.Logs;
+using LiteTerm.Core.QuickCommands;
 using LiteTerm.Core.Security;
 using LiteTerm.Core.Servers;
 using LiteTerm.Core.Settings;
@@ -169,6 +171,7 @@ public sealed class SqliteServerProfileRepositoryTests : IDisposable
             command.CommandText = """
                 DROP TABLE known_host;
                 DROP TABLE app_setting;
+                DROP TABLE server_log_entry;
                 DELETE FROM schema_migration WHERE version >= 2;
                 """;
             await command.ExecuteNonQueryAsync();
@@ -252,6 +255,124 @@ public sealed class SqliteServerProfileRepositoryTests : IDisposable
         var secondRepository = new SqliteServerProfileRepository(databasePath, new TestSecretProtector());
         Assert.Equal(ApplicationTheme.Light, await secondRepository.GetApplicationThemeAsync());
         Assert.Equal(terminalAppearance, await secondRepository.GetTerminalAppearanceAsync());
+    }
+
+    [Fact]
+    public async Task QuickCommands_UsesDefaultsAndPersistsNormalizedDefinitionsAcrossInstances()
+    {
+        var databasePath = Path.Combine(_directory, "liteterm.db");
+        var firstRepository = new SqliteServerProfileRepository(databasePath, new TestSecretProtector());
+
+        Assert.Equal(QuickCommandDefinition.Defaults, await firstRepository.GetQuickCommandsAsync());
+
+        var command = new QuickCommandDefinition(
+            Guid.NewGuid(),
+            "  应用日志  ",
+            "  tail -n 500 -F -- {path}  ");
+        await firstRepository.SaveQuickCommandsAsync([command]);
+
+        var secondRepository = new SqliteServerProfileRepository(databasePath, new TestSecretProtector());
+        var saved = Assert.Single(await secondRepository.GetQuickCommandsAsync());
+        Assert.Equal(command.Id, saved.Id);
+        Assert.Equal("应用日志", saved.Name);
+        Assert.Equal("tail -n 500 -F -- {path}", saved.CommandTemplate);
+    }
+
+    [Fact]
+    public async Task QuickCommands_CanPersistAnEmptyConfiguration()
+    {
+        var databasePath = Path.Combine(_directory, "liteterm.db");
+        var firstRepository = new SqliteServerProfileRepository(databasePath, new TestSecretProtector());
+        await firstRepository.SaveQuickCommandsAsync([]);
+
+        var secondRepository = new SqliteServerProfileRepository(databasePath, new TestSecretProtector());
+
+        Assert.Empty(await secondRepository.GetQuickCommandsAsync());
+    }
+
+    [Fact]
+    public async Task ServerLogEntries_ReplaceAtomicallyAndRemainIsolatedByServer()
+    {
+        var databasePath = Path.Combine(_directory, "liteterm.db");
+        var repository = new SqliteServerProfileRepository(databasePath, new TestSecretProtector());
+        var firstProfile = CreateProfile();
+        var secondProfile = CreateProfile();
+        await repository.SaveAsync(firstProfile);
+        await repository.SaveAsync(secondProfile);
+
+        var firstEntry = new ServerLogEntry(
+            Guid.NewGuid(), firstProfile.Id, "  应用日志  ", "/var/log/../app/application.log");
+        var secondEntry = new ServerLogEntry(
+            Guid.NewGuid(), firstProfile.Id, "系统日志", "/var/log/syslog");
+        await repository.ReplaceForServerAsync(firstProfile.Id, [firstEntry, secondEntry]);
+
+        var saved = await repository.GetForServerAsync(firstProfile.Id);
+        Assert.Equal(2, saved.Count);
+        Assert.Contains(saved, entry => entry == firstEntry with
+        {
+            Name = "应用日志",
+            RemotePath = "/var/app/application.log"
+        });
+        Assert.Empty(await repository.GetForServerAsync(secondProfile.Id));
+
+        await repository.ReplaceForServerAsync(firstProfile.Id, [secondEntry]);
+
+        Assert.Equal([secondEntry], await repository.GetForServerAsync(firstProfile.Id));
+    }
+
+    [Fact]
+    public async Task ServerLogEntries_AreDeletedWithOwningServerProfile()
+    {
+        var databasePath = Path.Combine(_directory, "liteterm.db");
+        var repository = new SqliteServerProfileRepository(databasePath, new TestSecretProtector());
+        var profile = CreateProfile();
+        await repository.SaveAsync(profile);
+        await repository.ReplaceForServerAsync(profile.Id,
+        [
+            new ServerLogEntry(Guid.NewGuid(), profile.Id, "应用日志", "/var/log/application.log")
+        ]);
+
+        await repository.DeleteAsync(profile.Id);
+
+        Assert.Empty(await repository.GetForServerAsync(profile.Id));
+    }
+
+    [Fact]
+    public async Task ServerLogEntries_RejectMissingOwningServerEvenWhenEmpty()
+    {
+        var repository = new SqliteServerProfileRepository(
+            Path.Combine(_directory, "liteterm.db"),
+            new TestSecretProtector());
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            repository.ReplaceForServerAsync(Guid.NewGuid(), []));
+    }
+
+    [Fact]
+    public async Task InitializeAsync_UpgradesVersionThreeDatabaseWithoutLosingProfiles()
+    {
+        var databasePath = Path.Combine(_directory, "liteterm.db");
+        var profile = CreateProfile();
+        var initialRepository = new SqliteServerProfileRepository(databasePath, new TestSecretProtector());
+        await initialRepository.SaveAsync(profile);
+
+        var connectionString = new SqliteConnectionStringBuilder { DataSource = databasePath, Pooling = false }.ToString();
+        await using (var connection = new SqliteConnection(connectionString))
+        {
+            await connection.OpenAsync();
+            await using var command = connection.CreateCommand();
+            command.CommandText = """
+                DROP TABLE server_log_entry;
+                DELETE FROM schema_migration WHERE version = 4;
+                """;
+            await command.ExecuteNonQueryAsync();
+        }
+
+        var upgradedRepository = new SqliteServerProfileRepository(databasePath, new TestSecretProtector());
+        await upgradedRepository.InitializeAsync();
+
+        Assert.Equal(profile, await upgradedRepository.GetByIdAsync(profile.Id));
+        Assert.Empty(await upgradedRepository.GetForServerAsync(profile.Id));
     }
 
     public void Dispose()

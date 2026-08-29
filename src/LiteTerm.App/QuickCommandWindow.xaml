@@ -1,0 +1,98 @@
+<Window x:Class="LiteTerm.App.QuickCommandWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="常用命令" Height="600" Width="860" MinHeight="520" MinWidth="760"
+        WindowStartupLocation="CenterOwner" ShowInTaskbar="False"
+        Background="{DynamicResource WindowBackgroundBrush}" Foreground="{DynamicResource PrimaryTextBrush}">
+    <Grid Margin="18">
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="260" />
+            <ColumnDefinition Width="18" />
+            <ColumnDefinition Width="*" />
+        </Grid.ColumnDefinitions>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <Grid Grid.Column="0">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+                <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
+            <TextBlock Text="已保存的命令" FontSize="15" FontWeight="SemiBold" Margin="0,0,0,10" />
+            <ListBox x:Name="CommandList" Grid.Row="1" DisplayMemberPath="Name"
+                     Background="{DynamicResource ListBackgroundBrush}"
+                     Foreground="{DynamicResource PrimaryTextBrush}"
+                     BorderBrush="{DynamicResource BorderBrush}"
+                     SelectionChanged="CommandList_SelectionChanged" />
+            <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,10,0,0">
+                <Button Content="新增" Width="76" Height="30" Margin="0,0,8,0" Click="New_Click" />
+                <Button Content="删除" Width="76" Height="30" Click="Delete_Click" />
+            </StackPanel>
+        </Grid>
+
+        <Grid Grid.Column="2">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+                <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
+
+            <TextBlock Text="名称" Foreground="{DynamicResource MutedTextBrush}" />
+            <TextBox x:Name="NameTextBox" Grid.Row="1" Height="34" Margin="0,5,0,14" Padding="8,4"
+                     Background="{DynamicResource ListBackgroundBrush}" Foreground="{DynamicResource PrimaryTextBrush}"
+                     BorderBrush="{DynamicResource BorderBrush}" TextChanged="Editor_TextChanged" />
+
+            <TextBlock Grid.Row="2" Foreground="{DynamicResource MutedTextBrush}">
+                <Run Text="命令模板（可使用 " /><Run Text="{}{path}" FontFamily="Consolas" /><Run Text="）" />
+            </TextBlock>
+            <TextBox x:Name="TemplateTextBox" Grid.Row="3" Height="64" Margin="0,5,0,14" Padding="8,6"
+                     AcceptsReturn="False" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"
+                     FontFamily="Consolas" Background="{DynamicResource ListBackgroundBrush}"
+                     Foreground="{DynamicResource PrimaryTextBrush}" BorderBrush="{DynamicResource BorderBrush}"
+                     TextChanged="Editor_TextChanged" />
+
+            <StackPanel Grid.Row="4">
+                <TextBlock Text="远程路径（仅在模板包含 {path} 时使用）"
+                           Foreground="{DynamicResource MutedTextBrush}" />
+                <TextBox x:Name="RemotePathTextBox" Height="34" Margin="0,5,0,14" Padding="8,4"
+                         FontFamily="Consolas" Background="{DynamicResource ListBackgroundBrush}"
+                         Foreground="{DynamicResource PrimaryTextBrush}" BorderBrush="{DynamicResource BorderBrush}"
+                         TextChanged="Editor_TextChanged" />
+            </StackPanel>
+
+            <Border Grid.Row="5" Padding="12" Background="{DynamicResource AlternateBackgroundBrush}"
+                    BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="4">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+                    <TextBlock Text="执行预览" FontWeight="SemiBold" />
+                    <TextBox x:Name="PreviewTextBox" Grid.Row="1" Margin="0,8,0,6" Padding="8,6"
+                             IsReadOnly="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"
+                             FontFamily="Consolas" Background="{DynamicResource ListBackgroundBrush}"
+                             Foreground="{DynamicResource PrimaryTextBrush}" BorderBrush="{DynamicResource BorderBrush}" />
+                    <TextBlock x:Name="ValidationText" Grid.Row="2" Foreground="#EF4444" TextWrapping="Wrap" />
+                </Grid>
+            </Border>
+
+            <Button Grid.Row="6" Content="应用当前编辑" Width="110" Height="30" Margin="0,10,0,0"
+                    HorizontalAlignment="Left" Click="Apply_Click" />
+        </Grid>
+
+        <StackPanel Grid.Row="1" Grid.ColumnSpan="3" Orientation="Horizontal"
+                    HorizontalAlignment="Right" Margin="0,18,0,0">
+            <Button Content="取消" Width="78" Height="32" Margin="0,0,8,0" IsCancel="True" />
+            <Button Content="保存配置" Width="92" Height="32" Margin="0,0,8,0" Click="Save_Click" />
+            <Button Content="执行所选" Width="92" Height="32" IsDefault="True" Click="Execute_Click" />
+        </StackPanel>
+    </Grid>
+</Window>
