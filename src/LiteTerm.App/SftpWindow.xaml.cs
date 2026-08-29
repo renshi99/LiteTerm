@@ -16,8 +16,12 @@ public partial class SftpWindow : Window
     private readonly Func<HostKeyInfo, bool> _hostKeyVerifier;
     private readonly CancellationTokenSource _lifetimeCancellation = new();
     private readonly Stopwatch _transferStopwatch = new();
+    private readonly TaskCompletionSource _closedCompletion = new(
+        TaskCreationOptions.RunContinuationsAsynchronously);
     private CancellationTokenSource? _transferCancellation;
     private bool _busy;
+    private bool _shutdownStarted;
+    private bool _shutdownCompleted;
 
     public SftpWindow(
         ISftpSession session,
@@ -35,7 +39,8 @@ public partial class SftpWindow : Window
         InitializeComponent();
         Title = $"SFTP - {options.Username}@{options.Host}";
         Loaded += SftpWindow_Loaded;
-        Closed += SftpWindow_Closed;
+        Closing += SftpWindow_Closing;
+        Closed += (_, _) => _closedCompletion.TrySetResult();
     }
 
     private async void SftpWindow_Loaded(object sender, RoutedEventArgs e)
@@ -677,12 +682,47 @@ public partial class SftpWindow : Window
         DeleteButton.IsEnabled = enabled && selectedEntry is not null;
     }
 
-    private async void SftpWindow_Closed(object? sender, EventArgs e)
+    public async Task CloseAndWaitAsync()
     {
+        if (!_shutdownStarted)
+        {
+            Close();
+        }
+
+        await _closedCompletion.Task;
+    }
+
+    private async void SftpWindow_Closing(object? sender, System.ComponentModel.CancelEventArgs e)
+    {
+        if (_shutdownCompleted)
+        {
+            return;
+        }
+
+        e.Cancel = true;
+        if (_shutdownStarted)
+        {
+            return;
+        }
+
+        _shutdownStarted = true;
+        IsEnabled = false;
         _lifetimeCancellation.Cancel();
         _transferCancellation?.Cancel();
-        await _session.DisposeAsync();
-        _transferCancellation?.Dispose();
-        _lifetimeCancellation.Dispose();
+        try
+        {
+            await _session.DisposeAsync();
+        }
+        catch (Exception)
+        {
+            // Closing must complete even if the remote connection fails during disposal.
+        }
+        finally
+        {
+            _transferCancellation?.Dispose();
+            _lifetimeCancellation.Dispose();
+            _shutdownCompleted = true;
+            Close();
+        }
     }
 }

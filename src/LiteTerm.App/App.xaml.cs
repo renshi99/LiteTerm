@@ -27,7 +27,7 @@ public partial class App : System.Windows.Application
             Path.Combine(applicationDataDirectory, "known_hosts.json"));
 
         MainWindow = new MainWindow(
-            new SshTerminalSession(),
+            static () => new SshTerminalSession(),
             dataStore,
             dataStore,
             dataStore,

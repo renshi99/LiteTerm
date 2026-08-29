@@ -4,7 +4,8 @@
         xmlns:local="clr-namespace:LiteTerm.App"
         xmlns:wv2="clr-namespace:Microsoft.Web.WebView2.Wpf;assembly=Microsoft.Web.WebView2.Wpf"
         Title="LiteTerm" Height="720" Width="1280" MinHeight="520" MinWidth="1050"
-        WindowStartupLocation="CenterScreen" Background="#111827">
+        WindowStartupLocation="CenterScreen" Background="#111827"
+        PreviewKeyDown="MainWindow_PreviewKeyDown">
     <Window.Resources>
         <local:LastConnectedAtConverter x:Key="LastConnectedAtConverter" />
         <Style TargetType="TextBox">
@@ -123,6 +124,7 @@
                     <ColumnDefinition Width="Auto" />
                     <ColumnDefinition Width="Auto" />
                     <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
                 </Grid.ColumnDefinitions>
 
                 <TextBlock Grid.Row="0" Grid.Column="0" Text="主机 / IP" Foreground="#9CA3AF" FontSize="11" Margin="2,0,0,3" />
@@ -141,7 +143,9 @@
                 <Button x:Name="ConnectButton" Grid.Row="1" Grid.Column="4" Content="连接" Click="Connect_Click" IsDefault="True" />
                 <Button x:Name="DisconnectButton" Grid.Row="1" Grid.Column="5" Content="断开" Click="Disconnect_Click" IsEnabled="False" />
                 <Button x:Name="SftpButton" Grid.Row="1" Grid.Column="6" Content="SFTP" Click="Sftp_Click" IsEnabled="False" />
-                <Button Grid.Row="1" Grid.Column="7" Content="终端外观" Click="TerminalAppearance_Click" Margin="0" />
+                <Button Grid.Row="1" Grid.Column="7" Content="新建标签" Click="NewTerminalTab_Click"
+                        ToolTip="新建终端标签 (Ctrl+Shift+T)" />
+                <Button Grid.Row="1" Grid.Column="8" Content="终端外观" Click="TerminalAppearance_Click" Margin="0" />
 
                 <Grid x:Name="PasswordPanel" Grid.Row="2" Grid.Column="0" Grid.ColumnSpan="4" Margin="0,8,0,0">
                     <Grid.ColumnDefinitions>
@@ -173,9 +177,8 @@
             </Grid>
         </Border>
 
-        <Border x:Name="TerminalBorder" Grid.Row="1" Grid.Column="1" Background="#050816" Padding="1">
-            <wv2:WebView2 x:Name="TerminalWebView" DefaultBackgroundColor="#050816" />
-        </Border>
+        <TabControl x:Name="TerminalTabs" Grid.Row="1" Grid.Column="1" Background="#050816"
+                    BorderThickness="0" Padding="0" SelectionChanged="TerminalTabs_SelectionChanged" />
 
         <Border Grid.Row="2" Grid.Column="1" Background="#1F2937" BorderBrush="#374151" BorderThickness="0,1,0,0">
             <Grid Margin="10,0">

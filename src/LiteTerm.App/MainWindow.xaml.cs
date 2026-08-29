@@ -1,55 +1,54 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.IO;
-using System.Text;
 using System.Text.Json;
 using System.Windows;
+using System.Windows.Controls;
 using System.Windows.Data;
+using System.Windows.Input;
 using System.Windows.Media;
-using System.Windows.Threading;
 using LiteTerm.Core.Connections;
 using LiteTerm.Core.Servers;
 using LiteTerm.Core.Settings;
 using LiteTerm.Core.Sftp;
 using LiteTerm.Core.Terminal;
 using Microsoft.Web.WebView2.Core;
+using Microsoft.Web.WebView2.Wpf;
 using Microsoft.Win32;
 
 namespace LiteTerm.App;
 
 public partial class MainWindow : Window
 {
-    private readonly ISshTerminalSession _session;
+    private readonly Func<ISshTerminalSession> _sshSessionFactory;
     private readonly IServerProfileRepository _dataStore;
     private readonly IKnownHostStore _knownHostStore;
     private readonly ITerminalAppearanceSettingsStore _terminalAppearanceStore;
     private readonly Func<ISftpSession> _sftpSessionFactory;
-    private const int OutputBufferCapacityBytes = 1024 * 1024;
-    private const int MaximumOutputBatchBytes = 64 * 1024;
-    private readonly BoundedTerminalOutputBuffer _outputBuffer = new(OutputBufferCapacityBytes);
-    private readonly DispatcherTimer _outputTimer;
+    private readonly List<TerminalTabContext> _terminalTabs = [];
     private readonly ObservableCollection<ServerProfile> _serverProfiles = [];
     private readonly ICollectionView _serverProfilesView;
-    private CancellationTokenSource? _connectionCancellation;
-    private int _columns = 80;
-    private int _rows = 24;
-    private bool _terminalReady;
-    private SshConnectionOptions? _activeConnectionOptions;
     private TerminalAppearanceSettings _terminalAppearance = TerminalAppearanceSettings.Default;
+    private bool _shutdownStarted;
+    private bool _shutdownCompleted;
+
+    private TerminalTabContext? CurrentTab => TerminalTabs.SelectedItem is TabItem { Tag: TerminalTabContext tab }
+        ? tab
+        : null;
 
     public MainWindow(
-        ISshTerminalSession session,
+        Func<ISshTerminalSession> sshSessionFactory,
         IServerProfileRepository dataStore,
         IKnownHostStore knownHostStore,
         ITerminalAppearanceSettingsStore terminalAppearanceStore,
         Func<ISftpSession> sftpSessionFactory)
     {
-        ArgumentNullException.ThrowIfNull(session);
+        ArgumentNullException.ThrowIfNull(sshSessionFactory);
         ArgumentNullException.ThrowIfNull(dataStore);
         ArgumentNullException.ThrowIfNull(knownHostStore);
         ArgumentNullException.ThrowIfNull(terminalAppearanceStore);
         ArgumentNullException.ThrowIfNull(sftpSessionFactory);
-        _session = session;
+        _sshSessionFactory = sshSessionFactory;
         _dataStore = dataStore;
         _knownHostStore = knownHostStore;
         _terminalAppearanceStore = terminalAppearanceStore;
@@ -63,13 +62,9 @@ public partial class MainWindow : Window
             new PropertyGroupDescription(nameof(ServerProfile.GroupName), new ServerGroupNameConverter()));
         ApplyServerSort();
         ServerList.ItemsSource = _serverProfilesView;
-        _session.OutputReceived += Session_OutputReceived;
-        _session.StateChanged += Session_StateChanged;
         Loaded += MainWindow_Loaded;
-        Closed += MainWindow_Closed;
-
-        _outputTimer = new DispatcherTimer(TimeSpan.FromMilliseconds(16), DispatcherPriority.Background, FlushOutput, Dispatcher);
-        _outputTimer.Start();
+        Closing += MainWindow_Closing;
+        AddTerminalTab();
     }
 
     private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
@@ -90,24 +85,9 @@ public partial class MainWindow : Window
             return;
         }
 
-        try
+        foreach (var tab in _terminalTabs.ToArray())
         {
-            await TerminalWebView.EnsureCoreWebView2Async();
-            TerminalWebView.CoreWebView2.Settings.AreDevToolsEnabled = false;
-            TerminalWebView.CoreWebView2.Settings.IsStatusBarEnabled = false;
-            TerminalWebView.CoreWebView2.Settings.AreBrowserAcceleratorKeysEnabled = false;
-            TerminalWebView.CoreWebView2.WebMessageReceived += Terminal_WebMessageReceived;
-            TerminalWebView.CoreWebView2.NavigationStarting += Terminal_NavigationStarting;
-
-            var terminalPage = Path.Combine(AppContext.BaseDirectory, "Terminal", "index.html");
-            TerminalWebView.Source = new Uri(terminalPage);
-        }
-        catch (Exception exception)
-        {
-            SetStatus($"终端初始化失败：{exception.Message}", "#EF4444");
-            MessageBox.Show(this,
-                "无法初始化 WebView2 终端。请确认系统已安装 WebView2 Runtime。\n\n" + exception.Message,
-                "LiteTerm", MessageBoxButton.OK, MessageBoxImage.Error);
+            await InitializeTerminalAsync(tab);
         }
     }
 
@@ -154,32 +134,48 @@ public partial class MainWindow : Window
         ServerProfile? savedProfile = null,
         ServerCredential? credentialToSave = null)
     {
-        if (!_terminalReady)
+        var tab = CurrentTab;
+        if (tab is null || tab.HasConnectionHistory || tab.Session.State != ConnectionState.Disconnected)
         {
-            MessageBox.Show(this, "终端仍在初始化，请稍后再试。", "LiteTerm", MessageBoxButton.OK, MessageBoxImage.Information);
-            return;
+            tab = AddTerminalTab();
+            await InitializeTerminalAsync(tab);
         }
 
-        if (_session.State is ConnectionState.Connecting or ConnectionState.Connected or ConnectionState.Disconnecting)
+        if (!tab.TerminalReady)
         {
-            MessageBox.Show(this, "请先断开当前会话。", "LiteTerm", MessageBoxButton.OK, MessageBoxImage.Information);
-            return;
+            try
+            {
+                await tab.WaitForTerminalReadyAsync(TimeSpan.FromSeconds(5));
+            }
+            catch (TimeoutException)
+            {
+                MessageBox.Show(this, "终端初始化超时，请关闭该标签后重试。", "LiteTerm",
+                    MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
         }
 
         var connectionCancellation = new CancellationTokenSource();
         var connected = false;
-        _connectionCancellation = connectionCancellation;
+        tab.ConnectionCancellation = connectionCancellation;
+        tab.HasConnectionHistory = true;
+        tab.DisplayName = savedProfile?.Name ?? $"{options.Username}@{options.Host}";
+        UpdateTabHeader(tab);
         try
         {
             SetConnectionControls(false, true, "取消连接");
-            await _session.ConnectAsync(
+            await tab.Session.ConnectAsync(
                 options,
                 hostKey => VerifyHostKey(options, hostKey),
-                _columns,
-                _rows,
+                tab.Columns,
+                tab.Rows,
                 connectionCancellation.Token);
-            TerminalWebView.Focus();
-            _activeConnectionOptions = options;
+            tab.WebView.Focus();
+            tab.ActiveConnectionOptions = options;
             connected = true;
         }
         catch (OperationCanceledException) when (connectionCancellation.IsCancellationRequested)
@@ -196,9 +192,9 @@ public partial class MainWindow : Window
         }
         finally
         {
-            if (ReferenceEquals(_connectionCancellation, connectionCancellation))
+            if (ReferenceEquals(tab.ConnectionCancellation, connectionCancellation))
             {
-                _connectionCancellation = null;
+                tab.ConnectionCancellation = null;
             }
 
             connectionCancellation.Dispose();
@@ -233,11 +229,216 @@ public partial class MainWindow : Window
         }
     }
 
+    private TerminalTabContext AddTerminalTab()
+    {
+        var webView = new WebView2
+        {
+            DefaultBackgroundColor = System.Drawing.ColorTranslator.FromHtml(_terminalAppearance.BackgroundColor)
+        };
+        var tab = new TerminalTabContext(_sshSessionFactory(), webView, Dispatcher);
+        tab.Session.OutputReceived += Session_OutputReceived;
+        tab.Session.StateChanged += Session_StateChanged;
+        _terminalTabs.Add(tab);
+
+        var tabItem = new TabItem
+        {
+            Tag = tab,
+            Content = new Border
+            {
+                Background = (Brush)new BrushConverter().ConvertFromString(_terminalAppearance.BackgroundColor)!,
+                Padding = new Thickness(1),
+                Child = webView
+            }
+        };
+        tabItem.Header = CreateTabHeader(tab, tabItem);
+        TerminalTabs.Items.Add(tabItem);
+        TerminalTabs.SelectedItem = tabItem;
+        return tab;
+    }
+
+    private FrameworkElement CreateTabHeader(TerminalTabContext tab, TabItem tabItem)
+    {
+        var title = new TextBlock
+        {
+            Text = tab.DisplayName,
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(2, 0, 8, 0),
+            MaxWidth = 220,
+            TextTrimming = TextTrimming.CharacterEllipsis
+        };
+        var close = new Button
+        {
+            Content = "×",
+            Width = 24,
+            Height = 24,
+            Padding = new Thickness(0),
+            Margin = new Thickness(0),
+            ToolTip = "关闭标签"
+        };
+        close.Click += async (_, _) => await CloseTerminalTabAsync(tabItem, tab);
+        var panel = new StackPanel { Orientation = Orientation.Horizontal };
+        panel.Children.Add(title);
+        panel.Children.Add(close);
+        return panel;
+    }
+
+    private async Task InitializeTerminalAsync(TerminalTabContext tab)
+    {
+        if (tab.WebView.CoreWebView2 is not null)
+        {
+            return;
+        }
+
+        try
+        {
+            await tab.WebView.EnsureCoreWebView2Async();
+            var coreWebView = tab.WebView.CoreWebView2
+                ?? throw new InvalidOperationException("WebView2 初始化未返回核心实例。");
+            coreWebView.Settings.AreDevToolsEnabled = false;
+            coreWebView.Settings.IsStatusBarEnabled = false;
+            coreWebView.Settings.AreBrowserAcceleratorKeysEnabled = false;
+            coreWebView.WebMessageReceived += Terminal_WebMessageReceived;
+            coreWebView.NavigationStarting += Terminal_NavigationStarting;
+            tab.WebView.Source = new Uri(Path.Combine(AppContext.BaseDirectory, "Terminal", "index.html"));
+        }
+        catch (Exception exception)
+        {
+            if (ReferenceEquals(tab, CurrentTab))
+            {
+                SetStatus($"终端初始化失败：{exception.Message}", "#EF4444");
+            }
+            MessageBox.Show(this,
+                "无法初始化 WebView2 终端。请确认系统已安装 WebView2 Runtime。\n\n" + exception.Message,
+                "LiteTerm", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
+    private async void NewTerminalTab_Click(object sender, RoutedEventArgs e)
+    {
+        var tab = AddTerminalTab();
+        if (IsLoaded)
+        {
+            await InitializeTerminalAsync(tab);
+        }
+    }
+
+    private async void MainWindow_PreviewKeyDown(object sender, KeyEventArgs e)
+    {
+        if ((Keyboard.Modifiers & (ModifierKeys.Control | ModifierKeys.Shift))
+            != (ModifierKeys.Control | ModifierKeys.Shift))
+        {
+            return;
+        }
+
+        if (e.Key == Key.T)
+        {
+            e.Handled = true;
+            var tab = AddTerminalTab();
+            await InitializeTerminalAsync(tab);
+        }
+        else if (e.Key == Key.W
+                 && TerminalTabs.SelectedItem is TabItem { Tag: TerminalTabContext tab } tabItem)
+        {
+            e.Handled = true;
+            await CloseTerminalTabAsync(tabItem, tab);
+        }
+    }
+
+    private async Task CloseTerminalTabAsync(TabItem tabItem, TerminalTabContext tab)
+    {
+        if (tab.Session.State is ConnectionState.Connecting or ConnectionState.Connected or ConnectionState.Disconnecting
+            && MessageBox.Show(this,
+                $"标签“{tab.DisplayName}”仍有活动会话。关闭标签将断开连接，是否继续？",
+                "关闭终端标签", MessageBoxButton.YesNo, MessageBoxImage.Warning, MessageBoxResult.No) != MessageBoxResult.Yes)
+        {
+            return;
+        }
+
+        tab.Session.OutputReceived -= Session_OutputReceived;
+        tab.Session.StateChanged -= Session_StateChanged;
+        if (tab.WebView.CoreWebView2 is not null)
+        {
+            tab.WebView.CoreWebView2.WebMessageReceived -= Terminal_WebMessageReceived;
+            tab.WebView.CoreWebView2.NavigationStarting -= Terminal_NavigationStarting;
+        }
+        TerminalTabs.Items.Remove(tabItem);
+        _terminalTabs.Remove(tab);
+        try
+        {
+            await tab.DisposeAsync();
+        }
+        catch (Exception)
+        {
+            MessageBox.Show(this, "终端标签关闭时部分资源释放失败。", "关闭终端标签",
+                MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+
+        if (_terminalTabs.Count == 0 && IsLoaded)
+        {
+            var replacement = AddTerminalTab();
+            await InitializeTerminalAsync(replacement);
+        }
+    }
+
+    private void TerminalTabs_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (!ReferenceEquals(e.Source, TerminalTabs) || CurrentTab is not { } tab)
+        {
+            return;
+        }
+
+        SizeText.Text = $"{tab.Columns} × {tab.Rows}";
+        UpdateCurrentTabState(tab);
+    }
+
+    private void UpdateCurrentTabState(TerminalTabContext tab)
+    {
+        switch (tab.Session.State)
+        {
+            case ConnectionState.Connecting:
+                SetStatus("正在连接…", "#F59E0B");
+                SetConnectionControls(false, true, "取消连接");
+                break;
+            case ConnectionState.Connected:
+                SetStatus("已连接", "#22C55E");
+                SetConnectionControls(false, true);
+                break;
+            case ConnectionState.Disconnecting:
+                SetStatus("正在断开…", "#F59E0B");
+                SetConnectionControls(false);
+                break;
+            case ConnectionState.Failed:
+                SetStatus("连接失败", "#EF4444");
+                SetConnectionControls(true);
+                break;
+            default:
+                SetStatus(tab.TerminalReady ? "终端已就绪" : "正在初始化终端…", "#9CA3AF");
+                SetConnectionControls(true);
+                break;
+        }
+    }
+
+    private void UpdateTabHeader(TerminalTabContext tab)
+    {
+        var text = TerminalTabTitle.Format(tab.DisplayName, tab.Session.State, tab.HasConnectionHistory);
+        var tabItem = TerminalTabs.Items.OfType<TabItem>().FirstOrDefault(item => ReferenceEquals(item.Tag, tab));
+        if (tabItem?.Header is StackPanel panel && panel.Children[0] is TextBlock title)
+        {
+            title.Text = text;
+        }
+    }
+
     private async void Disconnect_Click(object sender, RoutedEventArgs e)
     {
-        if (_session.State == ConnectionState.Connecting)
+        var tab = CurrentTab;
+        if (tab is null)
         {
-            CancelConnectionAttempt();
+            return;
+        }
+
+        if (tab.Session.State == ConnectionState.Connecting)
+        {
+            tab.CancelConnection();
             SetStatus("正在取消连接…", "#F59E0B");
             SetConnectionControls(false);
             return;
@@ -245,7 +446,7 @@ public partial class MainWindow : Window
 
         try
         {
-            await _session.DisconnectAsync();
+            await tab.Session.DisconnectAsync();
         }
         catch (Exception)
         {
@@ -328,6 +529,12 @@ public partial class MainWindow : Window
 
     private void Terminal_WebMessageReceived(object? sender, CoreWebView2WebMessageReceivedEventArgs eventArgs)
     {
+        var tab = _terminalTabs.FirstOrDefault(candidate => ReferenceEquals(candidate.WebView.CoreWebView2, sender));
+        if (tab is null)
+        {
+            return;
+        }
+
         try
         {
             using var message = JsonDocument.Parse(eventArgs.WebMessageAsJson);
@@ -337,19 +544,25 @@ public partial class MainWindow : Window
             switch (typeElement.GetString())
             {
                 case "ready":
-                    _terminalReady = true;
-                    ApplyTerminalAppearance();
-                    SetStatus("终端已就绪", "#9CA3AF");
+                    tab.MarkTerminalReady();
+                    ApplyTerminalAppearance(tab);
+                    if (ReferenceEquals(tab, CurrentTab))
+                    {
+                        SetStatus("终端已就绪", "#9CA3AF");
+                    }
                     break;
                 case "input" when root.TryGetProperty("data", out var dataElement):
-                    _ = SendTerminalInputAsync(dataElement.GetString() ?? string.Empty);
+                    _ = SendTerminalInputAsync(tab, dataElement.GetString() ?? string.Empty);
                     break;
                 case "resize" when root.TryGetProperty("columns", out var columnsElement)
                                    && root.TryGetProperty("rows", out var rowsElement):
-                    _columns = Math.Max(columnsElement.GetInt32(), 1);
-                    _rows = Math.Max(rowsElement.GetInt32(), 1);
-                    SizeText.Text = $"{_columns} × {_rows}";
-                    _session.Resize(_columns, _rows);
+                    tab.Columns = Math.Max(columnsElement.GetInt32(), 1);
+                    tab.Rows = Math.Max(rowsElement.GetInt32(), 1);
+                    if (ReferenceEquals(tab, CurrentTab))
+                    {
+                        SizeText.Text = $"{tab.Columns} × {tab.Rows}";
+                    }
+                    tab.Session.Resize(tab.Columns, tab.Rows);
                     break;
             }
         }
@@ -359,11 +572,11 @@ public partial class MainWindow : Window
         }
     }
 
-    private async Task SendTerminalInputAsync(string input)
+    private async Task SendTerminalInputAsync(TerminalTabContext tab, string input)
     {
         try
         {
-            await _session.SendAsync(input);
+            await tab.Session.SendAsync(input);
         }
         catch (Exception)
         {
@@ -373,8 +586,9 @@ public partial class MainWindow : Window
 
     private void Sftp_Click(object sender, RoutedEventArgs e)
     {
-        var options = _activeConnectionOptions;
-        if (_session.State != ConnectionState.Connected || options is null)
+        var tab = CurrentTab;
+        var options = tab?.ActiveConnectionOptions;
+        if (tab?.Session.State != ConnectionState.Connected || options is null)
         {
             MessageBox.Show(this, "请先建立 SSH 终端连接。", "SFTP", MessageBoxButton.OK, MessageBoxImage.Information);
             return;
@@ -387,6 +601,7 @@ public partial class MainWindow : Window
         {
             Owner = this
         };
+        tab.RegisterSftpWindow(window);
         window.Show();
     }
 
@@ -406,7 +621,10 @@ public partial class MainWindow : Window
             await _terminalAppearanceStore.SaveTerminalAppearanceAsync(dialog.Settings);
             _terminalAppearance = dialog.Settings;
             UpdateTerminalHostBackground();
-            ApplyTerminalAppearance();
+            foreach (var tab in _terminalTabs)
+            {
+                ApplyTerminalAppearance(tab);
+            }
         }
         catch (Exception)
         {
@@ -701,14 +919,14 @@ public partial class MainWindow : Window
         MessageBox.Show(this, "请先在左侧选择一台服务器。", "服务器管理", MessageBoxButton.OK, MessageBoxImage.Information);
     }
 
-    private void ApplyTerminalAppearance()
+    private void ApplyTerminalAppearance(TerminalTabContext tab)
     {
-        if (!_terminalReady || TerminalWebView.CoreWebView2 is null)
+        if (!tab.TerminalReady || tab.WebView.CoreWebView2 is null)
         {
             return;
         }
 
-        TerminalWebView.CoreWebView2.PostWebMessageAsJson(JsonSerializer.Serialize(new
+        tab.WebView.CoreWebView2.PostWebMessageAsJson(JsonSerializer.Serialize(new
         {
             type = "appearance",
             foreground = _terminalAppearance.ForegroundColor,
@@ -718,8 +936,15 @@ public partial class MainWindow : Window
 
     private void UpdateTerminalHostBackground()
     {
-        TerminalBorder.Background = (Brush)new BrushConverter().ConvertFromString(_terminalAppearance.BackgroundColor)!;
-        TerminalWebView.DefaultBackgroundColor = System.Drawing.ColorTranslator.FromHtml(_terminalAppearance.BackgroundColor);
+        TerminalTabs.Background = (Brush)new BrushConverter().ConvertFromString(_terminalAppearance.BackgroundColor)!;
+        foreach (var tab in _terminalTabs)
+        {
+            tab.WebView.DefaultBackgroundColor = System.Drawing.ColorTranslator.FromHtml(_terminalAppearance.BackgroundColor);
+            if (tab.WebView.Parent is Border border)
+            {
+                border.Background = TerminalTabs.Background;
+            }
+        }
     }
 
     private void Terminal_NavigationStarting(object? sender, CoreWebView2NavigationStartingEventArgs eventArgs)
@@ -732,43 +957,29 @@ public partial class MainWindow : Window
 
     private void Session_OutputReceived(object? sender, TerminalOutputEventArgs eventArgs)
     {
-        _outputBuffer.Enqueue(eventArgs.Data.Span);
-    }
-
-    private void FlushOutput(object? sender, EventArgs eventArgs)
-    {
-        if (!_terminalReady || TerminalWebView.CoreWebView2 is null) return;
-
-        var batch = _outputBuffer.DequeueUpTo(MaximumOutputBatchBytes);
-        if (batch.IsEmpty && batch.DroppedBytes == 0) return;
-
-        var overloadNotice = batch.DroppedBytes == 0
-            ? null
-            : Encoding.UTF8.GetBytes($"\r\n[LiteTerm：终端输出过快，已丢弃 {batch.DroppedBytes:N0} 个较早字节。]\r\n");
-
-        var payloadLength = batch.Data.Length + (overloadNotice?.Length ?? 0);
-        var payload = new byte[payloadLength];
-        var offset = 0;
-        if (overloadNotice is not null)
-        {
-            Buffer.BlockCopy(overloadNotice, 0, payload, 0, overloadNotice.Length);
-            offset = overloadNotice.Length;
-        }
-
-        Buffer.BlockCopy(batch.Data, 0, payload, offset, batch.Data.Length);
-
-        var message = JsonSerializer.Serialize(new
-        {
-            type = "output",
-            data = Convert.ToBase64String(payload)
-        });
-        TerminalWebView.CoreWebView2.PostWebMessageAsJson(message);
+        _terminalTabs.FirstOrDefault(tab => ReferenceEquals(tab.Session, sender))?.EnqueueOutput(eventArgs.Data.Span);
     }
 
     private void Session_StateChanged(object? sender, ConnectionState state)
     {
         _ = Dispatcher.InvokeAsync(() =>
         {
+            var tab = _terminalTabs.FirstOrDefault(candidate => ReferenceEquals(candidate.Session, sender));
+            if (tab is null)
+            {
+                return;
+            }
+
+            if (state is ConnectionState.Disconnected or ConnectionState.Failed)
+            {
+                tab.ActiveConnectionOptions = null;
+            }
+            UpdateTabHeader(tab);
+            if (!ReferenceEquals(tab, CurrentTab))
+            {
+                return;
+            }
+
             switch (state)
             {
                 case ConnectionState.Connecting:
@@ -785,12 +996,10 @@ public partial class MainWindow : Window
                     SetConnectionControls(false);
                     break;
                 case ConnectionState.Disconnected:
-                    _activeConnectionOptions = null;
                     SetStatus("已断开", "#9CA3AF");
                     SetConnectionControls(true);
                     break;
                 case ConnectionState.Failed:
-                    _activeConnectionOptions = null;
                     SetStatus("连接失败", "#EF4444");
                     SetConnectionControls(true);
                     break;
@@ -812,7 +1021,7 @@ public partial class MainWindow : Window
         BrowsePrivateKeyButton.IsEnabled = canConnect;
         PrivateKeyPassphraseInput.IsEnabled = canConnect;
         SaveConnectionCheckBox.IsEnabled = canConnect;
-        SftpButton.IsEnabled = _session.State == ConnectionState.Connected;
+        SftpButton.IsEnabled = CurrentTab?.Session.State == ConnectionState.Connected;
     }
 
     private SshAuthenticationType GetSelectedAuthenticationType()
@@ -830,25 +1039,41 @@ public partial class MainWindow : Window
         StatusDot.Fill = (Brush)new BrushConverter().ConvertFromString(color)!;
     }
 
-    private void CancelConnectionAttempt()
+    private async void MainWindow_Closing(object? sender, CancelEventArgs e)
     {
+        if (_shutdownCompleted)
+        {
+            return;
+        }
+
+        e.Cancel = true;
+        if (_shutdownStarted)
+        {
+            return;
+        }
+
+        _shutdownStarted = true;
+        IsEnabled = false;
+        var tabs = _terminalTabs.ToArray();
+        _terminalTabs.Clear();
+        foreach (var tab in tabs)
+        {
+            tab.Session.OutputReceived -= Session_OutputReceived;
+            tab.Session.StateChanged -= Session_StateChanged;
+        }
+
         try
         {
-            _connectionCancellation?.Cancel();
+            await Task.WhenAll(tabs.Select(tab => tab.DisposeAsync().AsTask()));
         }
-        catch (ObjectDisposedException)
+        catch (Exception)
         {
-            // The completed connection attempt has already released its cancellation source.
+            // Every tab has its own finally-based WebView cleanup; shutdown must still complete.
         }
-    }
-
-    private async void MainWindow_Closed(object? sender, EventArgs e)
-    {
-        CancelConnectionAttempt();
-        _outputTimer.Stop();
-        _session.OutputReceived -= Session_OutputReceived;
-        _session.StateChanged -= Session_StateChanged;
-        await _session.DisposeAsync();
-        TerminalWebView.Dispose();
+        finally
+        {
+            _shutdownCompleted = true;
+            Close();
+        }
     }
 }
