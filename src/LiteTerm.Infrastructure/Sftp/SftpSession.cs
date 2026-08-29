@@ -10,6 +10,7 @@ namespace LiteTerm.Infrastructure.Sftp;
 
 public sealed class SftpSession : ISftpSession
 {
+    private static readonly TimeSpan CleanupTimeout = TimeSpan.FromSeconds(5);
     private readonly SemaphoreSlim _gate = new(1, 1);
     private SftpClient? _client;
     private bool _disposed;
@@ -115,6 +116,300 @@ public sealed class SftpSession : ISftpSession
         }
     }
 
+    public async Task UploadFileAsync(
+        string localPath,
+        string remotePath,
+        SftpTransferConflictPolicy conflictPolicy,
+        IProgress<SftpTransferProgress>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ArgumentException.ThrowIfNullOrWhiteSpace(localPath);
+        ValidateConflictPolicy(conflictPolicy);
+        var normalizedRemotePath = RemotePath.Normalize(remotePath);
+
+        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var client = GetConnectedClient();
+            if (conflictPolicy == SftpTransferConflictPolicy.Fail &&
+                await client.ExistsAsync(normalizedRemotePath, cancellationToken).ConfigureAwait(false))
+            {
+                throw new SftpTransferConflictException(normalizedRemotePath);
+            }
+
+            await using var input = new FileStream(
+                localPath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read,
+                bufferSize: 64 * 1024,
+                FileOptions.Asynchronous | FileOptions.SequentialScan);
+
+            var totalBytes = input.Length;
+            var temporaryPath = CreateRemoteTemporaryPath(normalizedRemotePath, "part");
+            var committed = false;
+            try
+            {
+                progress?.Report(CreateProgress(0, totalBytes));
+                var uploadProgress = progress is null
+                    ? null
+                    : new ForwardingProgress<UploadFileProgressReport>(report =>
+                        progress.Report(CreateProgress(report.TotalBytesUploaded, totalBytes)));
+
+                await client.UploadFileAsync(
+                        input,
+                        temporaryPath,
+                        canOverride: false,
+                        uploadProgress,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+
+                await CommitRemoteUploadAsync(
+                        client,
+                        temporaryPath,
+                        normalizedRemotePath,
+                        conflictPolicy,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                committed = true;
+                progress?.Report(CreateProgress(totalBytes, totalBytes));
+            }
+            finally
+            {
+                if (!committed)
+                {
+                    await TryDeleteRemoteFileAsync(client, temporaryPath).ConfigureAwait(false);
+                }
+            }
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    public async Task DownloadFileAsync(
+        string remotePath,
+        string localPath,
+        SftpTransferConflictPolicy conflictPolicy,
+        IProgress<SftpTransferProgress>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ArgumentException.ThrowIfNullOrWhiteSpace(localPath);
+        ValidateConflictPolicy(conflictPolicy);
+        var normalizedRemotePath = RemotePath.Normalize(remotePath);
+        var fullLocalPath = Path.GetFullPath(localPath);
+
+        if (conflictPolicy == SftpTransferConflictPolicy.Fail && File.Exists(fullLocalPath))
+        {
+            throw new SftpTransferConflictException(fullLocalPath);
+        }
+
+        var localDirectory = Path.GetDirectoryName(fullLocalPath)
+            ?? throw new ArgumentException("本地目标路径必须包含有效目录。", nameof(localPath));
+        var temporaryPath = Path.Combine(
+            localDirectory,
+            $".liteterm-{Guid.NewGuid():N}.part");
+
+        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var client = GetConnectedClient();
+            var attributes = await client.GetAttributesAsync(normalizedRemotePath, cancellationToken)
+                .ConfigureAwait(false);
+            if (attributes.IsDirectory && !attributes.IsSymbolicLink)
+            {
+                throw new IOException($"远程路径不是文件：{normalizedRemotePath}");
+            }
+
+            var totalBytes = checked((long)attributes.Size);
+            var committed = false;
+            try
+            {
+                await using (var output = new FileStream(
+                                 temporaryPath,
+                                 FileMode.CreateNew,
+                                 FileAccess.Write,
+                                 FileShare.None,
+                                 bufferSize: 64 * 1024,
+                                 FileOptions.Asynchronous | FileOptions.SequentialScan))
+                {
+                    progress?.Report(CreateProgress(0, totalBytes));
+                    var downloadProgress = progress is null
+                        ? null
+                        : new ForwardingProgress<DownloadFileProgressReport>(report =>
+                            progress.Report(CreateProgress(report.TotalBytesDownloaded, totalBytes)));
+
+                    await client.DownloadFileAsync(
+                            normalizedRemotePath,
+                            output,
+                            downloadProgress,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                    await output.FlushAsync(cancellationToken).ConfigureAwait(false);
+                }
+
+                try
+                {
+                    File.Move(
+                        temporaryPath,
+                        fullLocalPath,
+                        overwrite: conflictPolicy == SftpTransferConflictPolicy.Overwrite);
+                }
+                catch (IOException) when (
+                    conflictPolicy == SftpTransferConflictPolicy.Fail && File.Exists(fullLocalPath))
+                {
+                    throw new SftpTransferConflictException(fullLocalPath);
+                }
+
+                committed = true;
+                progress?.Report(CreateProgress(totalBytes, totalBytes));
+            }
+            finally
+            {
+                if (!committed)
+                {
+                    TryDeleteLocalFile(temporaryPath);
+                }
+            }
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    public async Task CreateDirectoryAsync(
+        string path,
+        CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        var normalizedPath = RemotePath.Normalize(path);
+
+        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var client = GetConnectedClient();
+            if (await client.ExistsAsync(normalizedPath, cancellationToken).ConfigureAwait(false))
+            {
+                throw new SftpPathConflictException(normalizedPath);
+            }
+
+            await client.CreateDirectoryAsync(normalizedPath, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    public async Task RenameAsync(
+        string sourcePath,
+        string destinationPath,
+        CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        var normalizedSourcePath = RemotePath.Normalize(sourcePath);
+        var normalizedDestinationPath = RemotePath.Normalize(destinationPath);
+        if (normalizedSourcePath is "/" or ".")
+        {
+            throw new IOException("不能重命名远程根目录或当前工作目录。");
+        }
+
+        if (normalizedSourcePath == normalizedDestinationPath)
+        {
+            return;
+        }
+
+        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var client = GetConnectedClient();
+            if (normalizedSourcePath == WorkingDirectory)
+            {
+                throw new IOException("不能重命名远程根目录或当前工作目录。");
+            }
+
+            if (await client.ExistsAsync(normalizedDestinationPath, cancellationToken).ConfigureAwait(false))
+            {
+                throw new SftpPathConflictException(normalizedDestinationPath);
+            }
+
+            await client.RenameFileAsync(
+                    normalizedSourcePath,
+                    normalizedDestinationPath,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    public async Task DeleteFileAsync(
+        string path,
+        CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        var normalizedPath = RemotePath.Normalize(path);
+
+        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var client = GetConnectedClient();
+            var attributes = await client.GetAttributesAsync(normalizedPath, cancellationToken)
+                .ConfigureAwait(false);
+            if (attributes.IsDirectory && !attributes.IsSymbolicLink)
+            {
+                throw new IOException($"远程目标是目录，不能按文件删除：{normalizedPath}");
+            }
+
+            await client.DeleteFileAsync(normalizedPath, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    public async Task DeleteDirectoryAsync(
+        string path,
+        CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        var normalizedPath = RemotePath.Normalize(path);
+        if (normalizedPath is "/" or ".")
+        {
+            throw new IOException("不能删除远程根目录或当前工作目录。");
+        }
+
+        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var client = GetConnectedClient();
+            if (normalizedPath == WorkingDirectory)
+            {
+                throw new IOException("不能删除远程根目录或当前工作目录。");
+            }
+
+            var attributes = await client.GetAttributesAsync(normalizedPath, cancellationToken)
+                .ConfigureAwait(false);
+            if (!attributes.IsDirectory || attributes.IsSymbolicLink)
+            {
+                throw new IOException($"远程目标不是目录：{normalizedPath}");
+            }
+
+            await client.DeleteDirectoryAsync(normalizedPath, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
     public async Task DisconnectAsync(CancellationToken cancellationToken = default)
     {
         if (_disposed || State == ConnectionState.Disconnected)
@@ -164,6 +459,140 @@ public sealed class SftpSession : ISftpSession
             file.Length,
             new DateTimeOffset(DateTime.SpecifyKind(file.LastWriteTimeUtc, DateTimeKind.Utc)),
             FormatPermissions(file));
+    }
+
+    private SftpClient GetConnectedClient()
+    {
+        if (State != ConnectionState.Connected || _client is null)
+        {
+            throw new InvalidOperationException("SFTP 会话尚未连接。");
+        }
+
+        return _client;
+    }
+
+    private static void ValidateConflictPolicy(SftpTransferConflictPolicy conflictPolicy)
+    {
+        if (!Enum.IsDefined(conflictPolicy))
+        {
+            throw new ArgumentOutOfRangeException(nameof(conflictPolicy));
+        }
+    }
+
+    private static SftpTransferProgress CreateProgress(ulong bytesTransferred, long totalBytes)
+    {
+        var transferred = bytesTransferred > long.MaxValue
+            ? long.MaxValue
+            : (long)bytesTransferred;
+        return CreateProgress(transferred, totalBytes);
+    }
+
+    private static SftpTransferProgress CreateProgress(long bytesTransferred, long totalBytes)
+    {
+        return new SftpTransferProgress(
+            Math.Min(bytesTransferred, totalBytes),
+            totalBytes,
+            DateTimeOffset.UtcNow);
+    }
+
+    private static string CreateRemoteTemporaryPath(string remotePath, string suffix)
+    {
+        return RemotePath.Combine(
+            RemotePath.GetParent(remotePath),
+            $".liteterm-{Guid.NewGuid():N}.{suffix}");
+    }
+
+    private static async Task CommitRemoteUploadAsync(
+        SftpClient client,
+        string temporaryPath,
+        string destinationPath,
+        SftpTransferConflictPolicy conflictPolicy,
+        CancellationToken cancellationToken)
+    {
+        var destinationExists = await client.ExistsAsync(destinationPath, cancellationToken)
+            .ConfigureAwait(false);
+        if (!destinationExists)
+        {
+            await client.RenameFileAsync(temporaryPath, destinationPath, cancellationToken)
+                .ConfigureAwait(false);
+            return;
+        }
+
+        if (conflictPolicy == SftpTransferConflictPolicy.Fail)
+        {
+            throw new SftpTransferConflictException(destinationPath);
+        }
+
+        var destinationAttributes = await client.GetAttributesAsync(destinationPath, cancellationToken)
+            .ConfigureAwait(false);
+        if (destinationAttributes.IsDirectory)
+        {
+            throw new IOException($"远程目标是目录，无法使用文件覆盖：{destinationPath}");
+        }
+
+        var backupPath = CreateRemoteTemporaryPath(destinationPath, "backup");
+        await client.RenameFileAsync(destinationPath, backupPath, cancellationToken)
+            .ConfigureAwait(false);
+        try
+        {
+            await client.RenameFileAsync(temporaryPath, destinationPath, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch
+        {
+            await TryRestoreRemoteBackupAsync(client, backupPath, destinationPath).ConfigureAwait(false);
+            throw;
+        }
+
+        await TryDeleteRemoteFileAsync(client, backupPath).ConfigureAwait(false);
+    }
+
+    private static async Task TryRestoreRemoteBackupAsync(
+        SftpClient client,
+        string backupPath,
+        string destinationPath)
+    {
+        try
+        {
+            using var cleanupCancellation = new CancellationTokenSource(CleanupTimeout);
+            if (!await client.ExistsAsync(destinationPath, cleanupCancellation.Token).ConfigureAwait(false))
+            {
+                await client.RenameFileAsync(backupPath, destinationPath, cleanupCancellation.Token)
+                    .ConfigureAwait(false);
+            }
+        }
+        catch
+        {
+            // 保留备份文件，避免在恢复异常时进一步丢失原目标内容。
+        }
+    }
+
+    private static async Task TryDeleteRemoteFileAsync(SftpClient client, string path)
+    {
+        try
+        {
+            using var cleanupCancellation = new CancellationTokenSource(CleanupTimeout);
+            if (await client.ExistsAsync(path, cleanupCancellation.Token).ConfigureAwait(false))
+            {
+                await client.DeleteFileAsync(path, cleanupCancellation.Token).ConfigureAwait(false);
+            }
+        }
+        catch
+        {
+            // 清理失败不覆盖原始传输异常；残留文件使用 LiteTerm 专用前缀便于识别。
+        }
+    }
+
+    private static void TryDeleteLocalFile(string path)
+    {
+        try
+        {
+            File.Delete(path);
+        }
+        catch
+        {
+            // 清理失败不覆盖原始传输异常。
+        }
     }
 
     private static string FormatPermissions(ISftpFile file)
@@ -252,5 +681,10 @@ public sealed class SftpSession : ISftpSession
         {
             client.Dispose();
         }
+    }
+
+    private sealed class ForwardingProgress<T>(Action<T> callback) : IProgress<T>
+    {
+        public void Report(T value) => callback(value);
     }
 }

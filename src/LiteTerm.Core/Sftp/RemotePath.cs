@@ -5,6 +5,15 @@ namespace LiteTerm.Core.Sftp;
 /// </summary>
 public static class RemotePath
 {
+    public static void ValidateName(string name)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(name);
+        if (name is "." or ".." || name.Contains('/') || name.Contains('\0'))
+        {
+            throw new ArgumentException("远程名称不能是 . 或 ..，且不能包含 / 或空字符。", nameof(name));
+        }
+    }
+
     public static string Normalize(string path)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);

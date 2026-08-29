@@ -1,0 +1,25 @@
+<Window x:Class="LiteTerm.App.RemoteNameDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="远程名称" Height="190" Width="440" MinHeight="190" MinWidth="360"
+        WindowStartupLocation="CenterOwner" ResizeMode="NoResize" Background="#111827"
+        ShowInTaskbar="False">
+    <Grid Margin="18">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+        <TextBlock x:Name="PromptText" Foreground="#E5E7EB" />
+        <TextBox x:Name="NameTextBox" Grid.Row="1" Height="32" Margin="0,10,0,0"
+                 Padding="8,4" Background="#0F172A" Foreground="#E5E7EB"
+                 BorderBrush="#4B5563" />
+        <TextBlock Grid.Row="2" Margin="0,8,0,0" Foreground="#9CA3AF"
+                   Text="名称不能是 . 或 ..，且不能包含 /。" />
+        <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right">
+            <Button Content="取消" Width="76" Height="30" Margin="0,0,8,0" IsCancel="True" />
+            <Button Content="确定" Width="76" Height="30" IsDefault="True" Click="Ok_Click" />
+        </StackPanel>
+    </Grid>
+</Window>

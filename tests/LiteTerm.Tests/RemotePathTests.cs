@@ -36,4 +36,25 @@ public sealed class RemotePathTests
     {
         Assert.Equal(expected, RemotePath.GetParent(path));
     }
+
+    [Theory]
+    [InlineData("logs")]
+    [InlineData("中文 目录")]
+    [InlineData("name\\with-backslash")]
+    public void ValidateName_AcceptsSinglePosixSegment(string name)
+    {
+        RemotePath.ValidateName(name);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData(".")]
+    [InlineData("..")]
+    [InlineData("a/b")]
+    [InlineData("a\0b")]
+    public void ValidateName_RejectsInvalidSegment(string name)
+    {
+        Assert.Throws<ArgumentException>(() => RemotePath.ValidateName(name));
+    }
 }

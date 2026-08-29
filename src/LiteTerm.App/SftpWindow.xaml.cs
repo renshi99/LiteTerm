@@ -1,7 +1,11 @@
+using System.Diagnostics;
+using System.IO;
 using System.Windows;
+using System.Windows.Controls;
 using System.Windows.Input;
 using LiteTerm.Core.Connections;
 using LiteTerm.Core.Sftp;
+using Microsoft.Win32;
 
 namespace LiteTerm.App;
 
@@ -11,6 +15,8 @@ public partial class SftpWindow : Window
     private readonly SshConnectionOptions _options;
     private readonly Func<HostKeyInfo, bool> _hostKeyVerifier;
     private readonly CancellationTokenSource _lifetimeCancellation = new();
+    private readonly Stopwatch _transferStopwatch = new();
+    private CancellationTokenSource? _transferCancellation;
     private bool _busy;
 
     public SftpWindow(
@@ -93,6 +99,199 @@ public partial class SftpWindow : Window
         await LoadDirectoryAsync(PathTextBox.Text);
     }
 
+    private async void Upload_Click(object sender, RoutedEventArgs e)
+    {
+        if (_busy)
+        {
+            return;
+        }
+
+        var dialog = new OpenFileDialog
+        {
+            Title = "选择要上传的文件",
+            CheckFileExists = true,
+            Multiselect = false
+        };
+        if (dialog.ShowDialog(this) != true)
+        {
+            return;
+        }
+
+        var remotePath = RemotePath.Combine(PathTextBox.Text, Path.GetFileName(dialog.FileName));
+        var conflictPolicy = SftpTransferConflictPolicy.Fail;
+        var existingEntry = FindEntry(remotePath);
+        if (existingEntry is not null && existingEntry.Type != RemoteFileType.File)
+        {
+            MessageBox.Show(this,
+                $"远程路径已被非文件项目占用，无法上传。\n\n{remotePath}",
+                "SFTP", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
+        if (existingEntry is not null)
+        {
+            if (!ConfirmOverwrite(remotePath, "远程文件已存在，是否覆盖？"))
+            {
+                return;
+            }
+
+            conflictPolicy = SftpTransferConflictPolicy.Overwrite;
+        }
+
+        var completed = await RunTransferAsync(
+            $"正在上传 {Path.GetFileName(dialog.FileName)}",
+            (progress, cancellationToken) => UploadWithConflictRetryAsync(
+                dialog.FileName,
+                remotePath,
+                conflictPolicy,
+                progress,
+                cancellationToken));
+        if (completed)
+        {
+            await LoadDirectoryAsync(PathTextBox.Text);
+        }
+    }
+
+    private async void Download_Click(object sender, RoutedEventArgs e)
+    {
+        if (_busy || FileGrid.SelectedItem is not RemoteFileEntry { Type: RemoteFileType.File } file)
+        {
+            return;
+        }
+
+        var dialog = new SaveFileDialog
+        {
+            Title = "选择下载位置",
+            FileName = file.Name,
+            AddExtension = false,
+            OverwritePrompt = false
+        };
+        if (dialog.ShowDialog(this) != true)
+        {
+            return;
+        }
+
+        var conflictPolicy = SftpTransferConflictPolicy.Fail;
+        if (File.Exists(dialog.FileName))
+        {
+            if (!ConfirmOverwrite(dialog.FileName, "本地文件已存在，是否覆盖？"))
+            {
+                return;
+            }
+
+            conflictPolicy = SftpTransferConflictPolicy.Overwrite;
+        }
+
+        await RunTransferAsync(
+            $"正在下载 {file.Name}",
+            (progress, cancellationToken) => DownloadWithConflictRetryAsync(
+                file.FullPath,
+                dialog.FileName,
+                conflictPolicy,
+                progress,
+                cancellationToken));
+    }
+
+    private async void NewDirectory_Click(object sender, RoutedEventArgs e)
+    {
+        if (_busy)
+        {
+            return;
+        }
+
+        var dialog = new RemoteNameDialog("新建远程目录", "目录名称：")
+        {
+            Owner = this
+        };
+        if (dialog.ShowDialog() != true)
+        {
+            return;
+        }
+
+        var newPath = RemotePath.Combine(PathTextBox.Text, dialog.RemoteName);
+        if (FindEntry(newPath) is not null)
+        {
+            ShowPathConflict(newPath);
+            return;
+        }
+
+        if (await RunRemoteOperationAsync(
+                $"正在创建目录 {dialog.RemoteName} …",
+                "无法创建远程目录。",
+                cancellationToken => _session.CreateDirectoryAsync(newPath, cancellationToken)))
+        {
+            await LoadDirectoryAsync(PathTextBox.Text);
+        }
+    }
+
+    private async void Rename_Click(object sender, RoutedEventArgs e)
+    {
+        if (_busy || FileGrid.SelectedItem is not RemoteFileEntry entry)
+        {
+            return;
+        }
+
+        var dialog = new RemoteNameDialog("重命名远程项目", "新名称：", entry.Name)
+        {
+            Owner = this
+        };
+        if (dialog.ShowDialog() != true || dialog.RemoteName == entry.Name)
+        {
+            return;
+        }
+
+        var destinationPath = RemotePath.Combine(
+            RemotePath.GetParent(entry.FullPath),
+            dialog.RemoteName);
+        if (FindEntry(destinationPath) is not null)
+        {
+            ShowPathConflict(destinationPath);
+            return;
+        }
+
+        if (await RunRemoteOperationAsync(
+                $"正在重命名 {entry.Name} …",
+                "无法重命名远程项目。",
+                cancellationToken => _session.RenameAsync(
+                    entry.FullPath,
+                    destinationPath,
+                    cancellationToken)))
+        {
+            await LoadDirectoryAsync(PathTextBox.Text);
+        }
+    }
+
+    private async void Delete_Click(object sender, RoutedEventArgs e)
+    {
+        if (_busy || FileGrid.SelectedItem is not RemoteFileEntry entry)
+        {
+            return;
+        }
+
+        var description = entry.Type == RemoteFileType.Directory
+            ? "将删除所选空目录。非空目录不会被递归删除。"
+            : "将永久删除所选远程文件。";
+        if (MessageBox.Show(this,
+                $"{description}\n\n{entry.FullPath}",
+                "确认删除",
+                MessageBoxButton.YesNo,
+                MessageBoxImage.Warning,
+                MessageBoxResult.No) != MessageBoxResult.Yes)
+        {
+            return;
+        }
+
+        if (await RunRemoteOperationAsync(
+                $"正在删除 {entry.Name} …",
+                "无法删除远程项目。目录可能不是空目录，或当前账户没有足够权限。",
+                cancellationToken => entry.Type == RemoteFileType.Directory
+                    ? _session.DeleteDirectoryAsync(entry.FullPath, cancellationToken)
+                    : _session.DeleteFileAsync(entry.FullPath, cancellationToken)))
+        {
+            await LoadDirectoryAsync(PathTextBox.Text);
+        }
+    }
+
     private async void PathTextBox_KeyDown(object sender, KeyEventArgs e)
     {
         if (e.Key != Key.Enter || _busy)
@@ -114,6 +313,240 @@ public partial class SftpWindow : Window
         await LoadDirectoryAsync(directory.FullPath);
     }
 
+    private void FileGrid_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        UpdateActionButtons();
+    }
+
+    private void CancelTransfer_Click(object sender, RoutedEventArgs e)
+    {
+        var cancellation = _transferCancellation;
+        if (cancellation is null || cancellation.IsCancellationRequested)
+        {
+            return;
+        }
+
+        cancellation.Cancel();
+        CancelTransferButton.IsEnabled = false;
+        StatusText.Text = "正在取消传输…";
+    }
+
+    private async Task<bool> RunTransferAsync(
+        string title,
+        Func<IProgress<SftpTransferProgress>, CancellationToken, Task> transfer)
+    {
+        _transferCancellation?.Dispose();
+        _transferCancellation = CancellationTokenSource.CreateLinkedTokenSource(
+            _lifetimeCancellation.Token);
+        var cancellation = _transferCancellation;
+        var progress = new Progress<SftpTransferProgress>(UpdateTransferProgress);
+
+        TransferPanel.Visibility = Visibility.Visible;
+        TransferTitleText.Text = title;
+        TransferProgressBar.Value = 0;
+        TransferProgressText.Text = "0 B / 0 B · 0%";
+        CancelTransferButton.IsEnabled = true;
+        _transferStopwatch.Restart();
+        SetBusy(true, title);
+
+        try
+        {
+            await transfer(progress, cancellation.Token);
+            _transferStopwatch.Stop();
+            TransferTitleText.Text = title.Replace("正在", "已", StringComparison.Ordinal);
+            SetBusy(false, "传输完成");
+            return true;
+        }
+        catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+        {
+            _transferStopwatch.Stop();
+            if (!_lifetimeCancellation.IsCancellationRequested)
+            {
+                TransferTitleText.Text = "传输已取消";
+                SetBusy(false, "传输已取消，已有目标文件未被替换");
+            }
+
+            return false;
+        }
+        catch (Exception exception)
+        {
+            _transferStopwatch.Stop();
+            TransferTitleText.Text = "传输失败";
+            SetBusy(false, "传输失败");
+            MessageBox.Show(this,
+                $"文件传输失败。\n\n{exception.Message}",
+                "SFTP", MessageBoxButton.OK, MessageBoxImage.Error);
+            return false;
+        }
+        finally
+        {
+            CancelTransferButton.IsEnabled = false;
+            if (ReferenceEquals(_transferCancellation, cancellation))
+            {
+                _transferCancellation = null;
+            }
+
+            cancellation.Dispose();
+        }
+    }
+
+    private async Task<bool> RunRemoteOperationAsync(
+        string status,
+        string errorMessage,
+        Func<CancellationToken, Task> operation)
+    {
+        SetBusy(true, status);
+        try
+        {
+            await operation(_lifetimeCancellation.Token);
+            SetBusy(false, "操作完成");
+            return true;
+        }
+        catch (OperationCanceledException) when (_lifetimeCancellation.IsCancellationRequested)
+        {
+            return false;
+        }
+        catch (SftpPathConflictException exception)
+        {
+            SetBusy(false, "目标名称已存在");
+            ShowPathConflict(exception.Path);
+            return false;
+        }
+        catch (Exception exception)
+        {
+            SetBusy(false, "远程操作失败");
+            MessageBox.Show(this,
+                $"{errorMessage}\n\n{exception.Message}",
+                "SFTP",
+                MessageBoxButton.OK,
+                MessageBoxImage.Error);
+            return false;
+        }
+    }
+
+    private async Task UploadWithConflictRetryAsync(
+        string localPath,
+        string remotePath,
+        SftpTransferConflictPolicy conflictPolicy,
+        IProgress<SftpTransferProgress> progress,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await _session.UploadFileAsync(
+                localPath,
+                remotePath,
+                conflictPolicy,
+                progress,
+                cancellationToken);
+        }
+        catch (SftpTransferConflictException) when (conflictPolicy == SftpTransferConflictPolicy.Fail)
+        {
+            if (!ConfirmOverwrite(remotePath, "传输期间远程文件已被创建，是否覆盖？"))
+            {
+                _transferCancellation?.Cancel();
+                throw new OperationCanceledException(cancellationToken);
+            }
+
+            await _session.UploadFileAsync(
+                localPath,
+                remotePath,
+                SftpTransferConflictPolicy.Overwrite,
+                progress,
+                cancellationToken);
+        }
+    }
+
+    private async Task DownloadWithConflictRetryAsync(
+        string remotePath,
+        string localPath,
+        SftpTransferConflictPolicy conflictPolicy,
+        IProgress<SftpTransferProgress> progress,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await _session.DownloadFileAsync(
+                remotePath,
+                localPath,
+                conflictPolicy,
+                progress,
+                cancellationToken);
+        }
+        catch (SftpTransferConflictException) when (conflictPolicy == SftpTransferConflictPolicy.Fail)
+        {
+            if (!ConfirmOverwrite(localPath, "传输期间本地文件已被创建，是否覆盖？"))
+            {
+                _transferCancellation?.Cancel();
+                throw new OperationCanceledException(cancellationToken);
+            }
+
+            await _session.DownloadFileAsync(
+                remotePath,
+                localPath,
+                SftpTransferConflictPolicy.Overwrite,
+                progress,
+                cancellationToken);
+        }
+    }
+
+    private void UpdateTransferProgress(SftpTransferProgress snapshot)
+    {
+        TransferProgressBar.Value = snapshot.Percentage;
+        var elapsedSeconds = _transferStopwatch.Elapsed.TotalSeconds;
+        var bytesPerSecond = elapsedSeconds <= 0
+            ? 0
+            : snapshot.BytesTransferred / elapsedSeconds;
+        TransferProgressText.Text =
+            $"{FormatBytes(snapshot.BytesTransferred)} / {FormatBytes(snapshot.TotalBytes)} · " +
+            $"{snapshot.Percentage:N0}% · {FormatBytes(bytesPerSecond)}/s";
+    }
+
+    private RemoteFileEntry? FindEntry(string remotePath)
+    {
+        return FileGrid.ItemsSource is IEnumerable<RemoteFileEntry> entries
+            ? entries.FirstOrDefault(entry => string.Equals(
+                entry.FullPath,
+                remotePath,
+                StringComparison.Ordinal))
+            : null;
+    }
+
+    private bool ConfirmOverwrite(string path, string prompt)
+    {
+        return MessageBox.Show(this,
+            $"{prompt}\n\n{path}",
+            "确认覆盖",
+            MessageBoxButton.YesNo,
+            MessageBoxImage.Warning,
+            MessageBoxResult.No) == MessageBoxResult.Yes;
+    }
+
+    private void ShowPathConflict(string path)
+    {
+        MessageBox.Show(this,
+            $"目标名称已存在，请使用其他名称。\n\n{path}",
+            "SFTP",
+            MessageBoxButton.OK,
+            MessageBoxImage.Warning);
+    }
+
+    private static string FormatBytes(double bytes)
+    {
+        string[] units = ["B", "KB", "MB", "GB", "TB"];
+        var value = Math.Max(0, bytes);
+        var unitIndex = 0;
+        while (value >= 1024 && unitIndex < units.Length - 1)
+        {
+            value /= 1024;
+            unitIndex++;
+        }
+
+        return unitIndex == 0
+            ? $"{value:N0} {units[unitIndex]}"
+            : $"{value:N1} {units[unitIndex]}";
+    }
+
     private void SetBusy(bool busy, string status)
     {
         _busy = busy;
@@ -123,13 +556,27 @@ public partial class SftpWindow : Window
         GoButton.IsEnabled = enabled;
         RefreshButton.IsEnabled = enabled;
         FileGrid.IsEnabled = enabled;
+        UploadButton.IsEnabled = enabled;
+        NewDirectoryButton.IsEnabled = enabled;
+        UpdateActionButtons();
         StatusText.Text = status;
+    }
+
+    private void UpdateActionButtons()
+    {
+        var enabled = !_busy && _session.State == ConnectionState.Connected;
+        var selectedEntry = FileGrid.SelectedItem as RemoteFileEntry;
+        DownloadButton.IsEnabled = enabled && selectedEntry?.Type == RemoteFileType.File;
+        RenameButton.IsEnabled = enabled && selectedEntry is not null;
+        DeleteButton.IsEnabled = enabled && selectedEntry is not null;
     }
 
     private async void SftpWindow_Closed(object? sender, EventArgs e)
     {
         _lifetimeCancellation.Cancel();
+        _transferCancellation?.Cancel();
         await _session.DisposeAsync();
+        _transferCancellation?.Dispose();
         _lifetimeCancellation.Dispose();
     }
 }

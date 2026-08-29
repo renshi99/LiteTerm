@@ -6,7 +6,9 @@
     <Grid Margin="14">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
@@ -27,9 +29,23 @@
                     Click="Refresh_Click" IsEnabled="False" />
         </Grid>
 
-        <DataGrid x:Name="FileGrid" Grid.Row="1" Margin="0,12,0,10" AutoGenerateColumns="False"
+        <StackPanel Grid.Row="1" Margin="0,10,0,0" Orientation="Horizontal">
+            <Button x:Name="UploadButton" Content="上传文件" Width="82" Height="30" Margin="0,0,8,0"
+                    Click="Upload_Click" IsEnabled="False" />
+            <Button x:Name="DownloadButton" Content="下载文件" Width="82" Height="30"
+                    Margin="0,0,8,0" Click="Download_Click" IsEnabled="False" />
+            <Button x:Name="NewDirectoryButton" Content="新建目录" Width="82" Height="30"
+                    Margin="0,0,8,0" Click="NewDirectory_Click" IsEnabled="False" />
+            <Button x:Name="RenameButton" Content="重命名" Width="74" Height="30"
+                    Margin="0,0,8,0" Click="Rename_Click" IsEnabled="False" />
+            <Button x:Name="DeleteButton" Content="删除" Width="66" Height="30"
+                    Click="Delete_Click" IsEnabled="False" />
+        </StackPanel>
+
+        <DataGrid x:Name="FileGrid" Grid.Row="2" Margin="0,10,0,10" AutoGenerateColumns="False"
                   IsReadOnly="True" CanUserAddRows="False" CanUserDeleteRows="False"
                   SelectionMode="Single" MouseDoubleClick="FileGrid_MouseDoubleClick"
+                  SelectionChanged="FileGrid_SelectionChanged"
                   Background="#0F172A" Foreground="#E5E7EB" BorderBrush="#374151"
                   RowBackground="#0F172A" AlternatingRowBackground="#172033"
                   GridLinesVisibility="Horizontal" HorizontalGridLinesBrush="#273449">
@@ -42,7 +58,35 @@
             </DataGrid.Columns>
         </DataGrid>
 
-        <TextBlock x:Name="StatusText" Grid.Row="2" Text="正在建立独立 SFTP 连接…"
+        <Border x:Name="TransferPanel" Grid.Row="3" Margin="0,0,0,10" Padding="10"
+                Background="#172033" BorderBrush="#374151" BorderThickness="1"
+                Visibility="Collapsed">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <TextBlock x:Name="TransferTitleText" Foreground="#E5E7EB" TextTrimming="CharacterEllipsis" />
+                <Button x:Name="CancelTransferButton" Grid.Column="1" Grid.RowSpan="2"
+                        Content="取消" Width="66" Height="30" Margin="12,0,0,0"
+                        Click="CancelTransfer_Click" IsEnabled="False" />
+                <Grid Grid.Row="1" Margin="0,8,0,0">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <ProgressBar x:Name="TransferProgressBar" Height="12" Minimum="0" Maximum="100" />
+                    <TextBlock x:Name="TransferProgressText" Grid.Column="1" Margin="10,-3,0,0"
+                               MinWidth="200" TextAlignment="Right" Foreground="#9CA3AF" />
+                </Grid>
+            </Grid>
+        </Border>
+
+        <TextBlock x:Name="StatusText" Grid.Row="4" Text="正在建立独立 SFTP 连接…"
                    Foreground="#9CA3AF" />
     </Grid>
 </Window>
