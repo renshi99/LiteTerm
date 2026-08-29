@@ -40,12 +40,16 @@
                     Margin="0,0,8,0" Click="Rename_Click" IsEnabled="False" />
             <Button x:Name="DeleteButton" Content="删除" Width="66" Height="30"
                     Click="Delete_Click" IsEnabled="False" />
+            <TextBlock Margin="14,0,0,0" VerticalAlignment="Center" Foreground="#9CA3AF"
+                       Text="也可将本地文件拖到下方列表上传" />
         </StackPanel>
 
         <DataGrid x:Name="FileGrid" Grid.Row="2" Margin="0,10,0,10" AutoGenerateColumns="False"
                   IsReadOnly="True" CanUserAddRows="False" CanUserDeleteRows="False"
                   SelectionMode="Single" MouseDoubleClick="FileGrid_MouseDoubleClick"
                   SelectionChanged="FileGrid_SelectionChanged"
+                  AllowDrop="True" PreviewDragOver="FileGrid_PreviewDragOver"
+                  DragLeave="FileGrid_DragLeave" Drop="FileGrid_Drop"
                   Background="#0F172A" Foreground="#E5E7EB" BorderBrush="#374151"
                   RowBackground="#0F172A" AlternatingRowBackground="#172033"
                   GridLinesVisibility="Horizontal" HorizontalGridLinesBrush="#273449">

@@ -59,7 +59,7 @@ public sealed class SshTerminalSessionIntegrationTests
     }
 }
 
-public sealed class SshIntegrationFactAttribute : FactAttribute
+public class SshIntegrationFactAttribute : FactAttribute
 {
     public SshIntegrationFactAttribute()
     {
@@ -68,6 +68,21 @@ public sealed class SshIntegrationFactAttribute : FactAttribute
             || string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("LITETERM_TEST_SSH_PASSWORD")))
         {
             Skip = "需要设置 SSH 集成测试环境变量后才能运行。";
+        }
+    }
+}
+
+public sealed class LargeSftpIntegrationFactAttribute : SshIntegrationFactAttribute
+{
+    public LargeSftpIntegrationFactAttribute()
+    {
+        if (Skip is null &&
+            (!long.TryParse(
+                Environment.GetEnvironmentVariable("LITETERM_TEST_SFTP_LARGE_FILE_BYTES"),
+                out var fileSize) ||
+             fileSize < 1))
+        {
+            Skip = "需要设置有效的 LITETERM_TEST_SFTP_LARGE_FILE_BYTES 后才能运行大文件测试。";
         }
     }
 }

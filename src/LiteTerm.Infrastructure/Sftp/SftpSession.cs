@@ -132,10 +132,17 @@ public sealed class SftpSession : ISftpSession
         try
         {
             var client = GetConnectedClient();
-            if (conflictPolicy == SftpTransferConflictPolicy.Fail &&
-                await client.ExistsAsync(normalizedRemotePath, cancellationToken).ConfigureAwait(false))
+            if (await client.ExistsAsync(normalizedRemotePath, cancellationToken).ConfigureAwait(false))
             {
-                throw new SftpTransferConflictException(normalizedRemotePath);
+                if (conflictPolicy == SftpTransferConflictPolicy.Fail)
+                {
+                    throw new SftpTransferConflictException(normalizedRemotePath);
+                }
+
+                var destinationAttributes = await client
+                    .GetAttributesAsync(normalizedRemotePath, cancellationToken)
+                    .ConfigureAwait(false);
+                EnsureRegularFileUploadTarget(destinationAttributes, normalizedRemotePath);
             }
 
             await using var input = new FileStream(
@@ -525,10 +532,7 @@ public sealed class SftpSession : ISftpSession
 
         var destinationAttributes = await client.GetAttributesAsync(destinationPath, cancellationToken)
             .ConfigureAwait(false);
-        if (destinationAttributes.IsDirectory)
-        {
-            throw new IOException($"远程目标是目录，无法使用文件覆盖：{destinationPath}");
-        }
+        EnsureRegularFileUploadTarget(destinationAttributes, destinationPath);
 
         var backupPath = CreateRemoteTemporaryPath(destinationPath, "backup");
         await client.RenameFileAsync(destinationPath, backupPath, cancellationToken)
@@ -545,6 +549,21 @@ public sealed class SftpSession : ISftpSession
         }
 
         await TryDeleteRemoteFileAsync(client, backupPath).ConfigureAwait(false);
+    }
+
+    private static void EnsureRegularFileUploadTarget(
+        SftpFileAttributes attributes,
+        string destinationPath)
+    {
+        if (attributes.IsDirectory && !attributes.IsSymbolicLink)
+        {
+            throw new IOException($"远程目标是目录，无法使用文件覆盖：{destinationPath}");
+        }
+
+        if (!attributes.IsRegularFile)
+        {
+            throw new IOException($"远程目标不是常规文件，无法使用文件覆盖：{destinationPath}");
+        }
     }
 
     private static async Task TryRestoreRemoteBackupAsync(

@@ -110,46 +110,152 @@ public partial class SftpWindow : Window
         {
             Title = "选择要上传的文件",
             CheckFileExists = true,
-            Multiselect = false
+            Multiselect = true
         };
         if (dialog.ShowDialog(this) != true)
         {
             return;
         }
 
-        var remotePath = RemotePath.Combine(PathTextBox.Text, Path.GetFileName(dialog.FileName));
-        var conflictPolicy = SftpTransferConflictPolicy.Fail;
-        var existingEntry = FindEntry(remotePath);
-        if (existingEntry is not null && existingEntry.Type != RemoteFileType.File)
+        await UploadFilesAsync(dialog.FileNames);
+    }
+
+    private void FileGrid_PreviewDragOver(object sender, DragEventArgs e)
+    {
+        e.Handled = true;
+        e.Effects = !_busy && GetDroppedPaths(e.Data).Count > 0
+            ? DragDropEffects.Copy
+            : DragDropEffects.None;
+        StatusText.Text = e.Effects == DragDropEffects.Copy
+            ? "释放鼠标以上传到当前远程目录"
+            : "只能拖入本地文件，传输期间不能加入新任务";
+    }
+
+    private void FileGrid_DragLeave(object sender, DragEventArgs e)
+    {
+        if (!_busy)
         {
-            MessageBox.Show(this,
-                $"远程路径已被非文件项目占用，无法上传。\n\n{remotePath}",
-                "SFTP", MessageBoxButton.OK, MessageBoxImage.Warning);
+            RestoreDirectoryStatus();
+        }
+    }
+
+    private async void FileGrid_Drop(object sender, DragEventArgs e)
+    {
+        e.Handled = true;
+        if (_busy)
+        {
             return;
         }
 
-        if (existingEntry is not null)
+        var droppedPaths = GetDroppedPaths(e.Data);
+        SetBusy(true, "正在检查拖入的本地文件…");
+        string[] files;
+        try
         {
-            if (!ConfirmOverwrite(remotePath, "远程文件已存在，是否覆盖？"))
-            {
-                return;
-            }
-
-            conflictPolicy = SftpTransferConflictPolicy.Overwrite;
+            files = await Task.Run(() => droppedPaths
+                .Where(File.Exists)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray(), _lifetimeCancellation.Token);
+        }
+        catch (OperationCanceledException) when (_lifetimeCancellation.IsCancellationRequested)
+        {
+            return;
         }
 
-        var completed = await RunTransferAsync(
-            $"正在上传 {Path.GetFileName(dialog.FileName)}",
-            (progress, cancellationToken) => UploadWithConflictRetryAsync(
-                dialog.FileName,
-                remotePath,
-                conflictPolicy,
-                progress,
-                cancellationToken));
-        if (completed)
+        if (_lifetimeCancellation.IsCancellationRequested)
+        {
+            return;
+        }
+
+        SetBusy(false, $"{files.Length} 个文件待上传");
+        var ignoredCount = droppedPaths.Count - files.Length;
+        if (ignoredCount > 0)
+        {
+            MessageBox.Show(this,
+                $"已忽略 {ignoredCount} 个目录、失效路径或重复文件；拖拽上传目前只支持文件。",
+                "SFTP",
+                MessageBoxButton.OK,
+                MessageBoxImage.Information);
+        }
+
+        if (files.Length == 0)
+        {
+            RestoreDirectoryStatus();
+            return;
+        }
+
+        await UploadFilesAsync(files);
+    }
+
+    private async Task UploadFilesAsync(IReadOnlyList<string> localPaths)
+    {
+        var uploadedCount = 0;
+        foreach (var localPath in localPaths)
+        {
+            if (_lifetimeCancellation.IsCancellationRequested)
+            {
+                break;
+            }
+
+            var fileName = Path.GetFileName(localPath);
+            var remotePath = RemotePath.Combine(PathTextBox.Text, fileName);
+            var conflictPolicy = SftpTransferConflictPolicy.Fail;
+            var existingEntry = FindEntry(remotePath);
+            if (existingEntry is not null && existingEntry.Type != RemoteFileType.File)
+            {
+                MessageBox.Show(this,
+                    $"远程路径已被非文件项目占用，已跳过此文件。\n\n{remotePath}",
+                    "SFTP", MessageBoxButton.OK, MessageBoxImage.Warning);
+                continue;
+            }
+
+            if (existingEntry is not null)
+            {
+                if (!ConfirmOverwrite(remotePath, "远程文件已存在，是否覆盖？"))
+                {
+                    continue;
+                }
+
+                conflictPolicy = SftpTransferConflictPolicy.Overwrite;
+            }
+
+            var completed = await RunTransferAsync(
+                $"正在上传 {fileName}",
+                (progress, cancellationToken) => UploadWithConflictRetryAsync(
+                    localPath,
+                    remotePath,
+                    conflictPolicy,
+                    progress,
+                    cancellationToken));
+            if (!completed)
+            {
+                break;
+            }
+
+            uploadedCount++;
+        }
+
+        if (uploadedCount > 0 && !_lifetimeCancellation.IsCancellationRequested)
         {
             await LoadDirectoryAsync(PathTextBox.Text);
         }
+        else if (!_busy)
+        {
+            RestoreDirectoryStatus();
+        }
+    }
+
+    private static IReadOnlyList<string> GetDroppedPaths(IDataObject data)
+    {
+        return data.GetDataPresent(DataFormats.FileDrop, true) &&
+               data.GetData(DataFormats.FileDrop, true) is string[] paths
+            ? paths
+            : [];
+    }
+
+    private void RestoreDirectoryStatus()
+    {
+        StatusText.Text = $"{FileGrid.Items.Count} 个项目";
     }
 
     private async void Download_Click(object sender, RoutedEventArgs e)
