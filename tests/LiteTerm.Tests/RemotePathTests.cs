@@ -38,6 +38,16 @@ public sealed class RemotePathTests
     }
 
     [Theory]
+    [InlineData("/", "")]
+    [InlineData(".", "")]
+    [InlineData("/var/log/application.log", "application.log")]
+    [InlineData("logs/应用 日志.log", "应用 日志.log")]
+    public void GetName_ReturnsFinalPosixSegment(string path, string expected)
+    {
+        Assert.Equal(expected, RemotePath.GetName(path));
+    }
+
+    [Theory]
     [InlineData("logs")]
     [InlineData("中文 目录")]
     [InlineData("name\\with-backslash")]

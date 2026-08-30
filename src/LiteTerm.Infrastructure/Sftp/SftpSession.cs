@@ -226,9 +226,9 @@ public sealed class SftpSession : ISftpSession
             var client = GetConnectedClient();
             var attributes = await client.GetAttributesAsync(normalizedRemotePath, cancellationToken)
                 .ConfigureAwait(false);
-            if (attributes.IsDirectory && !attributes.IsSymbolicLink)
+            if (!attributes.IsRegularFile)
             {
-                throw new IOException($"远程路径不是文件：{normalizedRemotePath}");
+                throw new IOException($"远程路径不是常规文件：{normalizedRemotePath}");
             }
 
             var totalBytes = checked((long)attributes.Size);

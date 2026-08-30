@@ -14,7 +14,7 @@ internal sealed class TerminalTabContext : IAsyncDisposable
 {
     private const int MaximumOutputBatchBytes = 64 * 1024;
     private readonly DispatcherTimer _outputTimer;
-    private readonly List<SftpWindow> _sftpWindows = [];
+    private readonly List<ITabOwnedWindow> _ownedWindows = [];
     private readonly TaskCompletionSource _terminalReadyCompletion = new(
         TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly CancellationTokenSource _lifetimeCancellation = new();
@@ -41,6 +41,8 @@ internal sealed class TerminalTabContext : IAsyncDisposable
     public CancellationTokenSource? ConnectionCancellation { get; set; }
     public SshConnectionOptions? ActiveConnectionOptions { get; set; }
     public Guid? ActiveServerProfileId { get; set; }
+    public SshConnectionOptions? LastConnectionOptions { get; set; }
+    public Guid? LastServerProfileId { get; set; }
     public string DisplayName { get; set; } = "新建终端";
     public int Columns { get; set; } = 80;
     public int Rows { get; set; } = 24;
@@ -49,11 +51,11 @@ internal sealed class TerminalTabContext : IAsyncDisposable
 
     public void EnqueueOutput(ReadOnlySpan<byte> data) => OutputBuffer.Enqueue(data);
 
-    public void RegisterSftpWindow(SftpWindow window)
+    public void RegisterOwnedWindow(ITabOwnedWindow window)
     {
         ArgumentNullException.ThrowIfNull(window);
-        _sftpWindows.Add(window);
-        window.Closed += (_, _) => _sftpWindows.Remove(window);
+        _ownedWindows.Add(window);
+        window.Closed += (_, _) => _ownedWindows.Remove(window);
     }
 
     public void MarkTerminalReady()
@@ -122,14 +124,18 @@ internal sealed class TerminalTabContext : IAsyncDisposable
         _outputTimer.Stop();
         try
         {
-            await Task.WhenAll(_sftpWindows.ToArray().Select(window => window.CloseAndWaitAsync()));
-            _sftpWindows.Clear();
+            await Task.WhenAll(_ownedWindows.ToArray().Select(window => window.CloseAndWaitAsync()));
+            _ownedWindows.Clear();
             await Session.DisposeAsync();
         }
         finally
         {
             ConnectionCancellation?.Dispose();
             ConnectionCancellation = null;
+            ActiveConnectionOptions = null;
+            ActiveServerProfileId = null;
+            LastConnectionOptions = null;
+            LastServerProfileId = null;
             _lifetimeCancellation.Dispose();
             WebView.Dispose();
         }

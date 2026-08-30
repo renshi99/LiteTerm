@@ -154,6 +154,22 @@ public partial class MainWindow : Window
             await InitializeTerminalAsync(tab);
         }
 
+        await ConnectTabAsync(tab, options, savedProfile, credentialToSave);
+    }
+
+    private async Task ConnectTabAsync(
+        TerminalTabContext tab,
+        SshConnectionOptions options,
+        ServerProfile? savedProfile = null,
+        ServerCredential? credentialToSave = null)
+    {
+        if (!_terminalTabs.Contains(tab)
+            || tab.Session.State is ConnectionState.Connecting or ConnectionState.Connected
+                or ConnectionState.Disconnecting)
+        {
+            return;
+        }
+
         if (!tab.TerminalReady)
         {
             try
@@ -177,6 +193,8 @@ public partial class MainWindow : Window
         tab.ConnectionCancellation = connectionCancellation;
         tab.HasConnectionHistory = true;
         tab.ActiveServerProfileId = credentialToSave is null ? savedProfile?.Id : null;
+        tab.LastConnectionOptions = options;
+        tab.LastServerProfileId = credentialToSave is null ? savedProfile?.Id : null;
         tab.DisplayName = savedProfile?.Name ?? $"{options.Username}@{options.Host}";
         UpdateTabHeader(tab);
         try
@@ -249,6 +267,7 @@ public partial class MainWindow : Window
 
                 await RefreshServerProfilesAsync(connectedProfile.Id);
                 tab.ActiveServerProfileId = connectedProfile.Id;
+                tab.LastServerProfileId = connectedProfile.Id;
                 if (ReferenceEquals(tab, CurrentTab))
                 {
                     SetConnectionControls(false, true);
@@ -256,6 +275,11 @@ public partial class MainWindow : Window
             }
             catch (Exception)
             {
+                if (credentialToSave is not null)
+                {
+                    tab.LastServerProfileId = null;
+                }
+
                 var message = credentialToSave is null
                     ? "连接已建立，但无法更新最近连接时间。"
                     : "连接已建立，但无法保存至本地连接。";
@@ -631,6 +655,23 @@ public partial class MainWindow : Window
         }
     }
 
+    private async void Reconnect_Click(object sender, RoutedEventArgs e)
+    {
+        var tab = CurrentTab;
+        if (tab?.LastConnectionOptions is not { } options
+            || !TerminalReconnectPolicy.CanReconnect(tab.Session.State, hasConnectionSnapshot: true))
+        {
+            MessageBox.Show(this, "当前标签没有可用于重连的连接记录。", "重新连接",
+                MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        var savedProfile = tab.LastServerProfileId is { } serverId
+            ? _serverProfiles.FirstOrDefault(profile => profile.Id == serverId)
+            : null;
+        await ConnectTabAsync(tab, options, savedProfile);
+    }
+
     private void Sftp_Click(object sender, RoutedEventArgs e)
     {
         var tab = CurrentTab;
@@ -648,7 +689,7 @@ public partial class MainWindow : Window
         {
             Owner = this
         };
-        tab.RegisterSftpWindow(window);
+        tab.RegisterOwnedWindow(window);
         window.Show();
     }
 
@@ -717,6 +758,12 @@ public partial class MainWindow : Window
             }
 
             await _serverLogEntryStore.ReplaceForServerAsync(serverId, dialog.Entries, tab.LifetimeToken);
+            if (dialog.RemotePathToDownload is { } remotePath)
+            {
+                StartLogDownload(tab, serverId, remotePath);
+                return;
+            }
+
             if (dialog.CommandToExecute is null)
             {
                 return;
@@ -742,6 +789,70 @@ public partial class MainWindow : Window
             MessageBox.Show(this, "无法读取或保存当前服务器的常用日志。", "常用日志",
                 MessageBoxButton.OK, MessageBoxImage.Error);
         }
+    }
+
+    private void StartLogDownload(TerminalTabContext tab, Guid serverId, string remotePath)
+    {
+        if (!_terminalTabs.Contains(tab)
+            || tab.Session.State != ConnectionState.Connected
+            || tab.ActiveServerProfileId != serverId
+            || tab.ActiveConnectionOptions is not { } options)
+        {
+            MessageBox.Show(this, "当前服务器连接已断开，日志未下载。", "常用日志",
+                MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        var defaultName = RemotePath.GetName(remotePath);
+        var dialog = new SaveFileDialog
+        {
+            Title = "选择日志下载位置",
+            FileName = string.IsNullOrEmpty(defaultName) ? "remote.log" : defaultName,
+            AddExtension = false,
+            OverwritePrompt = false
+        };
+        if (dialog.ShowDialog(this) != true)
+        {
+            return;
+        }
+
+        var conflictPolicy = SftpTransferConflictPolicy.Fail;
+        if (File.Exists(dialog.FileName))
+        {
+            if (MessageBox.Show(this,
+                    $"本地文件已存在，是否覆盖？\n\n{dialog.FileName}",
+                    "确认覆盖",
+                    MessageBoxButton.YesNo,
+                    MessageBoxImage.Warning,
+                    MessageBoxResult.No) != MessageBoxResult.Yes)
+            {
+                return;
+            }
+
+            conflictPolicy = SftpTransferConflictPolicy.Overwrite;
+        }
+
+        if (!_terminalTabs.Contains(tab)
+            || tab.Session.State != ConnectionState.Connected
+            || tab.ActiveServerProfileId != serverId)
+        {
+            MessageBox.Show(this, "当前服务器连接已断开，日志未下载。", "常用日志",
+                MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        var window = new LogDownloadWindow(
+            _sftpSessionFactory(),
+            options,
+            hostKey => VerifyHostKey(options, hostKey),
+            remotePath,
+            dialog.FileName,
+            conflictPolicy)
+        {
+            Owner = this
+        };
+        tab.RegisterOwnedWindow(window);
+        window.Show();
     }
 
     private async void TerminalAppearance_Click(object sender, RoutedEventArgs e)
@@ -825,9 +936,18 @@ public partial class MainWindow : Window
         try
         {
             await _dataStore.DeleteAsync(profile.Id);
-            foreach (var tab in _terminalTabs.Where(tab => tab.ActiveServerProfileId == profile.Id))
+            foreach (var tab in _terminalTabs.Where(tab =>
+                         tab.ActiveServerProfileId == profile.Id || tab.LastServerProfileId == profile.Id))
             {
-                tab.ActiveServerProfileId = null;
+                if (tab.ActiveServerProfileId == profile.Id)
+                {
+                    tab.ActiveServerProfileId = null;
+                }
+
+                if (tab.LastServerProfileId == profile.Id)
+                {
+                    tab.LastServerProfileId = null;
+                }
             }
 
             await RefreshServerProfilesAsync();
@@ -1175,6 +1295,10 @@ public partial class MainWindow : Window
         BrowsePrivateKeyButton.IsEnabled = canConnect;
         PrivateKeyPassphraseInput.IsEnabled = canConnect;
         SaveConnectionCheckBox.IsEnabled = canConnect;
+        ReconnectButton.IsEnabled = CurrentTab is { } currentTab
+                                    && TerminalReconnectPolicy.CanReconnect(
+                                        currentTab.Session.State,
+                                        currentTab.LastConnectionOptions is not null);
         SftpButton.IsEnabled = CurrentTab?.Session.State == ConnectionState.Connected;
         QuickCommandButton.IsEnabled = CurrentTab?.Session.State == ConnectionState.Connected;
         LogShortcutButton.IsEnabled = CurrentTab?.Session.State == ConnectionState.Connected

@@ -179,6 +179,8 @@
 
                 <StackPanel Grid.Row="3" Grid.ColumnSpan="7" Orientation="Horizontal"
                             HorizontalAlignment="Right" Margin="0,8,0,0">
+                    <Button x:Name="ReconnectButton" Content="重连" Click="Reconnect_Click" IsEnabled="False"
+                            ToolTip="在当前标签中使用上次连接参数重新连接" />
                     <Button x:Name="LogShortcutButton" Content="日志入口"
                             Click="ServerLogs_Click" IsEnabled="False" />
                     <Button x:Name="QuickCommandButton" Content="快捷命令"

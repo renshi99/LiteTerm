@@ -35,6 +35,8 @@ public partial class ServerLogWindow : Window
 
     public string? CommandToExecute { get; private set; }
 
+    public string? RemotePathToDownload { get; private set; }
+
     private void LogList_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (LogList.SelectedItem is not ServerLogEntry entry)
@@ -97,6 +99,17 @@ public partial class ServerLogWindow : Window
 
     private void EnterDirectory_Click(object sender, RoutedEventArgs e) =>
         CompleteWithCommand(QuickCommandDefinition.EnterLogDirectoryTemplate);
+
+    private void Download_Click(object sender, RoutedEventArgs e)
+    {
+        if (!TryApplyCurrent(showMessage: true, out var entry))
+        {
+            return;
+        }
+
+        RemotePathToDownload = entry.RemotePath;
+        DialogResult = true;
+    }
 
     private void CompleteWithCommand(string commandTemplate)
     {

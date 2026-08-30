@@ -9,7 +9,7 @@ using Microsoft.Win32;
 
 namespace LiteTerm.App;
 
-public partial class SftpWindow : Window
+public partial class SftpWindow : Window, ITabOwnedWindow
 {
     private readonly ISftpSession _session;
     private readonly SshConnectionOptions _options;

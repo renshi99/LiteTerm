@@ -90,6 +90,7 @@
             <Button Content="取消" Width="78" Height="32" Margin="0,0,8,0" IsCancel="True" />
             <Button Content="保存配置" Width="92" Height="32" Margin="0,0,8,0" Click="Save_Click" />
             <Button Content="进入目录" Width="92" Height="32" Margin="0,0,8,0" Click="EnterDirectory_Click" />
+            <Button Content="下载日志" Width="92" Height="32" Margin="0,0,8,0" Click="Download_Click" />
             <Button Content="追踪日志" Width="92" Height="32" IsDefault="True" Click="Follow_Click" />
         </StackPanel>
     </Grid>

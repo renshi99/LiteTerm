@@ -1,0 +1,52 @@
+<Window x:Class="LiteTerm.App.LogDownloadWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="下载日志" Height="270" Width="680" MinHeight="250" MinWidth="560"
+        WindowStartupLocation="CenterOwner" ShowInTaskbar="False"
+        Background="{DynamicResource WindowBackgroundBrush}" Foreground="{DynamicResource PrimaryTextBrush}">
+    <Grid Margin="18">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <TextBlock Text="远程日志" Foreground="{DynamicResource MutedTextBrush}" />
+        <TextBlock x:Name="RemotePathText" Grid.Row="1" Margin="0,4,0,12"
+                   FontFamily="Consolas" TextWrapping="Wrap" />
+
+        <Border Grid.Row="2" Padding="12" Background="{DynamicResource AlternateBackgroundBrush}"
+                BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="4">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+                <TextBlock x:Name="TransferTitleText" Text="正在建立独立 SFTP 连接…"
+                           TextTrimming="CharacterEllipsis" />
+                <Grid Grid.Row="1" Margin="0,10,0,0">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <ProgressBar x:Name="TransferProgressBar" Height="13" Minimum="0" Maximum="100" />
+                    <TextBlock x:Name="TransferProgressText" Grid.Column="1" Margin="12,-3,0,0"
+                               MinWidth="215" TextAlignment="Right"
+                               Foreground="{DynamicResource MutedTextBrush}" Text="等待传输" />
+                </Grid>
+            </Grid>
+        </Border>
+
+        <TextBlock x:Name="StatusText" Grid.Row="3" Margin="0,12,0,0"
+                   Foreground="{DynamicResource MutedTextBrush}" TextWrapping="Wrap"
+                   Text="日志下载使用独立连接，不会占用当前 SSH 终端。" />
+
+        <StackPanel Grid.Row="4" Orientation="Horizontal" HorizontalAlignment="Right">
+            <Button x:Name="CancelButton" Content="取消下载" Width="88" Height="32"
+                    Margin="0,0,8,0" Click="Cancel_Click" />
+            <Button Content="关闭" Width="78" Height="32" IsCancel="True" Click="Close_Click" />
+        </StackPanel>
+    </Grid>
+</Window>

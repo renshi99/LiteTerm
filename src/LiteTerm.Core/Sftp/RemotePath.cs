@@ -79,4 +79,16 @@ public static class RemotePath
 
         return separatorIndex == 0 ? "/" : normalized[..separatorIndex];
     }
+
+    public static string GetName(string path)
+    {
+        var normalized = Normalize(path);
+        if (normalized is "/" or ".")
+        {
+            return string.Empty;
+        }
+
+        var separatorIndex = normalized.LastIndexOf('/');
+        return separatorIndex < 0 ? normalized : normalized[(separatorIndex + 1)..];
+    }
 }
