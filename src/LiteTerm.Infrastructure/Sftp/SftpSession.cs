@@ -1,6 +1,8 @@
 using System.Security.Cryptography;
 using LiteTerm.Core.Connections;
 using LiteTerm.Core.Sftp;
+using LiteTerm.Infrastructure.Connections;
+using LiteTerm.Infrastructure.Diagnostics;
 using LiteTerm.Infrastructure.Ssh;
 using Renci.SshNet;
 using Renci.SshNet.Common;
@@ -12,14 +14,22 @@ public sealed class SftpSession : ISftpSession
 {
     private static readonly TimeSpan CleanupTimeout = TimeSpan.FromSeconds(5);
     private readonly SemaphoreSlim _gate = new(1, 1);
+    private readonly IConnectionDiagnosticLogger _diagnosticLogger;
     private SftpClient? _client;
     private bool _disposed;
 
     public ConnectionState State { get; private set; } = ConnectionState.Disconnected;
 
+    public ConnectionFailure? LastFailure { get; private set; }
+
     public string? WorkingDirectory { get; private set; }
 
     public event EventHandler<ConnectionState>? StateChanged;
+
+    public SftpSession(IConnectionDiagnosticLogger? diagnosticLogger = null)
+    {
+        _diagnosticLogger = diagnosticLogger ?? NullConnectionDiagnosticLogger.Instance;
+    }
 
     public async Task ConnectAsync(
         SshConnectionOptions options,
@@ -31,6 +41,7 @@ public sealed class SftpSession : ISftpSession
         ArgumentNullException.ThrowIfNull(hostKeyVerifier);
 
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        var hostKeyRejected = false;
         try
         {
             if (State is ConnectionState.Connecting or ConnectionState.Connected)
@@ -38,6 +49,7 @@ public sealed class SftpSession : ISftpSession
                 return;
             }
 
+            LastFailure = null;
             SetState(ConnectionState.Connecting);
             DisposeClient();
 
@@ -52,6 +64,7 @@ public sealed class SftpSession : ISftpSession
                 eventArgs.CanTrust = hostKeyVerifier(new HostKeyInfo(
                     eventArgs.HostKeyName,
                     $"SHA256:{fingerprint.TrimEnd('=')}"));
+                hostKeyRejected = !eventArgs.CanTrust;
             };
 
             _client = client;
@@ -62,13 +75,17 @@ public sealed class SftpSession : ISftpSession
         catch when (cancellationToken.IsCancellationRequested)
         {
             DisposeClient();
+            LastFailure = null;
             SetState(ConnectionState.Disconnected);
             throw new OperationCanceledException(cancellationToken);
         }
-        catch
+        catch (Exception exception)
         {
             DisposeClient();
-            SetState(ConnectionState.Failed);
+            await SetFailureAsync(
+                exception,
+                ConnectionOperation.Connect,
+                hostKeyRejected).ConfigureAwait(false);
             throw;
         }
         finally
@@ -429,6 +446,7 @@ public sealed class SftpSession : ISftpSession
         {
             SetState(ConnectionState.Disconnecting);
             DisposeClient();
+            LastFailure = null;
             SetState(ConnectionState.Disconnected);
         }
         finally
@@ -638,10 +656,10 @@ public sealed class SftpSession : ISftpSession
 
     private void OnClientErrorOccurred(object? sender, ExceptionEventArgs eventArgs)
     {
-        _ = TransitionToFailedAsync();
+        _ = TransitionToFailedAsync(eventArgs.Exception);
     }
 
-    private async Task TransitionToFailedAsync()
+    private async Task TransitionToFailedAsync(Exception exception)
     {
         if (_disposed)
         {
@@ -665,7 +683,7 @@ public sealed class SftpSession : ISftpSession
             }
 
             DisposeClient();
-            SetState(ConnectionState.Failed);
+            await SetFailureAsync(exception, ConnectionOperation.Transport).ConfigureAwait(false);
         }
         finally
         {
@@ -699,6 +717,30 @@ public sealed class SftpSession : ISftpSession
         finally
         {
             client.Dispose();
+        }
+    }
+
+    private async ValueTask SetFailureAsync(
+        Exception exception,
+        ConnectionOperation operation,
+        bool hostKeyRejected = false)
+    {
+        var failure = ConnectionFailureMapper.Map(exception, operation, hostKeyRejected);
+        LastFailure = failure;
+        SetState(ConnectionState.Failed);
+
+        try
+        {
+            await _diagnosticLogger.WriteAsync(new ConnectionDiagnosticEntry(
+                DateTimeOffset.UtcNow,
+                ConnectionProtocol.Sftp,
+                operation,
+                failure.Code,
+                exception.GetType().FullName ?? exception.GetType().Name)).ConfigureAwait(false);
+        }
+        catch
+        {
+            // 诊断日志不可用时不能覆盖原始连接错误或阻止会话释放。
         }
     }
 

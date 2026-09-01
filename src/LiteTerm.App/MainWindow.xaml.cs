@@ -235,7 +235,8 @@ public partial class MainWindow : Window
                 }
 
                 MessageBox.Show(this,
-                    "无法建立 SSH 连接。请检查主机、端口、网络状态和认证信息后重试。",
+                    tab.Session.LastFailure?.UserMessage
+                    ?? "无法建立 SSH 连接，请检查连接信息后重试。",
                     "连接失败", MessageBoxButton.OK, MessageBoxImage.Error);
             }
         }
@@ -468,7 +469,7 @@ public partial class MainWindow : Window
                 SetConnectionControls(false);
                 break;
             case ConnectionState.Failed:
-                SetStatus("连接失败", "#EF4444");
+                SetStatus(tab.Session.LastFailure?.UserMessage ?? "连接失败", "#EF4444");
                 SetConnectionControls(true);
                 break;
             default:
@@ -1274,7 +1275,7 @@ public partial class MainWindow : Window
                     SetConnectionControls(true);
                     break;
                 case ConnectionState.Failed:
-                    SetStatus("连接失败", "#EF4444");
+                    SetStatus(tab.Session.LastFailure?.UserMessage ?? "连接失败", "#EF4444");
                     SetConnectionControls(true);
                     break;
             }

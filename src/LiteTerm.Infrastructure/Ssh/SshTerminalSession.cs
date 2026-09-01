@@ -1,6 +1,8 @@
 using System.Security.Cryptography;
 using System.Text;
 using LiteTerm.Core.Connections;
+using LiteTerm.Infrastructure.Connections;
+using LiteTerm.Infrastructure.Diagnostics;
 using Renci.SshNet;
 using Renci.SshNet.Common;
 
@@ -9,14 +11,22 @@ namespace LiteTerm.Infrastructure.Ssh;
 public sealed class SshTerminalSession : ISshTerminalSession
 {
     private readonly SemaphoreSlim _lifecycleLock = new(1, 1);
+    private readonly IConnectionDiagnosticLogger _diagnosticLogger;
     private SshClient? _client;
     private ShellStream? _shell;
     private bool _disposed;
 
     public ConnectionState State { get; private set; } = ConnectionState.Disconnected;
 
+    public ConnectionFailure? LastFailure { get; private set; }
+
     public event EventHandler<ConnectionState>? StateChanged;
     public event EventHandler<TerminalOutputEventArgs>? OutputReceived;
+
+    public SshTerminalSession(IConnectionDiagnosticLogger? diagnosticLogger = null)
+    {
+        _diagnosticLogger = diagnosticLogger ?? NullConnectionDiagnosticLogger.Instance;
+    }
 
     public async Task ConnectAsync(
         SshConnectionOptions options,
@@ -30,6 +40,7 @@ public sealed class SshTerminalSession : ISshTerminalSession
         ArgumentNullException.ThrowIfNull(hostKeyVerifier);
 
         await _lifecycleLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        var hostKeyRejected = false;
         try
         {
             if (State is ConnectionState.Connecting or ConnectionState.Connected)
@@ -37,6 +48,7 @@ public sealed class SshTerminalSession : ISshTerminalSession
                 return;
             }
 
+            LastFailure = null;
             SetState(ConnectionState.Connecting);
             DisposeConnection();
 
@@ -54,6 +66,7 @@ public sealed class SshTerminalSession : ISshTerminalSession
                 eventArgs.CanTrust = hostKeyVerifier(new HostKeyInfo(
                     eventArgs.HostKeyName,
                     $"SHA256:{fingerprint.TrimEnd('=')}"));
+                hostKeyRejected = !eventArgs.CanTrust;
             };
 
             _client = client;
@@ -74,13 +87,17 @@ public sealed class SshTerminalSession : ISshTerminalSession
         catch when (cancellationToken.IsCancellationRequested)
         {
             DisposeConnection();
+            LastFailure = null;
             SetState(ConnectionState.Disconnected);
             throw new OperationCanceledException(cancellationToken);
         }
-        catch
+        catch (Exception exception)
         {
             DisposeConnection();
-            SetState(ConnectionState.Failed);
+            await SetFailureAsync(
+                exception,
+                ConnectionOperation.Connect,
+                hostKeyRejected).ConfigureAwait(false);
             throw;
         }
         finally
@@ -108,9 +125,9 @@ public sealed class SshTerminalSession : ISshTerminalSession
         {
             throw;
         }
-        catch
+        catch (Exception exception)
         {
-            await TransitionToFailedAsync().ConfigureAwait(false);
+            await TransitionToFailedAsync(exception, ConnectionOperation.Send).ConfigureAwait(false);
             throw;
         }
     }
@@ -126,9 +143,9 @@ public sealed class SshTerminalSession : ISshTerminalSession
         {
             _shell.ChangeWindowSize((uint)columns, (uint)rows, 0, 0);
         }
-        catch
+        catch (Exception exception)
         {
-            _ = TransitionToFailedAsync();
+            _ = TransitionToFailedAsync(exception, ConnectionOperation.Resize);
         }
     }
 
@@ -144,6 +161,7 @@ public sealed class SshTerminalSession : ISshTerminalSession
         {
             SetState(ConnectionState.Disconnecting);
             await Task.Run(DisposeConnection, CancellationToken.None).ConfigureAwait(false);
+            LastFailure = null;
             SetState(ConnectionState.Disconnected);
         }
         finally
@@ -171,10 +189,10 @@ public sealed class SshTerminalSession : ISshTerminalSession
 
     private void OnClientErrorOccurred(object? sender, ExceptionEventArgs eventArgs)
     {
-        _ = TransitionToFailedAsync();
+        _ = TransitionToFailedAsync(eventArgs.Exception, ConnectionOperation.Transport);
     }
 
-    private async Task TransitionToFailedAsync()
+    private async Task TransitionToFailedAsync(Exception exception, ConnectionOperation operation)
     {
         if (_disposed)
         {
@@ -198,7 +216,7 @@ public sealed class SshTerminalSession : ISshTerminalSession
             }
 
             DisposeConnection();
-            SetState(ConnectionState.Failed);
+            await SetFailureAsync(exception, operation).ConfigureAwait(false);
         }
         finally
         {
@@ -210,6 +228,30 @@ public sealed class SshTerminalSession : ISshTerminalSession
     {
         State = state;
         StateChanged?.Invoke(this, state);
+    }
+
+    private async ValueTask SetFailureAsync(
+        Exception exception,
+        ConnectionOperation operation,
+        bool hostKeyRejected = false)
+    {
+        var failure = ConnectionFailureMapper.Map(exception, operation, hostKeyRejected);
+        LastFailure = failure;
+        SetState(ConnectionState.Failed);
+
+        try
+        {
+            await _diagnosticLogger.WriteAsync(new ConnectionDiagnosticEntry(
+                DateTimeOffset.UtcNow,
+                ConnectionProtocol.Ssh,
+                operation,
+                failure.Code,
+                exception.GetType().FullName ?? exception.GetType().Name)).ConfigureAwait(false);
+        }
+        catch
+        {
+            // 诊断日志不可用时不能覆盖原始连接错误或阻止会话释放。
+        }
     }
 
     private void DisposeConnection()

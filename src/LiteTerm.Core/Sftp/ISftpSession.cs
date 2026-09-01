@@ -9,6 +9,8 @@ public interface ISftpSession : IAsyncDisposable
 {
     ConnectionState State { get; }
 
+    ConnectionFailure? LastFailure { get; }
+
     string? WorkingDirectory { get; }
 
     event EventHandler<ConnectionState>? StateChanged;

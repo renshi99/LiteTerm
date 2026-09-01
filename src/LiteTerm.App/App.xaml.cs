@@ -1,8 +1,9 @@
-﻿using System.Configuration;
+using System.Configuration;
 using System.Data;
 using System.IO;
 using System.Windows;
 using LiteTerm.Infrastructure.Data;
+using LiteTerm.Infrastructure.Diagnostics;
 using LiteTerm.Infrastructure.Security;
 using LiteTerm.Infrastructure.Sftp;
 using LiteTerm.Infrastructure.Ssh;
@@ -25,15 +26,17 @@ public partial class App : System.Windows.Application
             Path.Combine(applicationDataDirectory, "liteterm.db"),
             new WindowsDpapiSecretProtector(),
             Path.Combine(applicationDataDirectory, "known_hosts.json"));
+        var diagnosticLogger = new FileConnectionDiagnosticLogger(
+            Path.Combine(applicationDataDirectory, "logs", "connection-diagnostic.jsonl"));
 
         MainWindow = new MainWindow(
-            static () => new SshTerminalSession(),
+            () => new SshTerminalSession(diagnosticLogger),
             dataStore,
             dataStore,
             dataStore,
             dataStore,
             dataStore,
-            static () => new SftpSession());
+            () => new SftpSession(diagnosticLogger));
         MainWindow.Show();
     }
 }

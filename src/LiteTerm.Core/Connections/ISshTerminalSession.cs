@@ -4,6 +4,8 @@ public interface ISshTerminalSession : IAsyncDisposable
 {
     ConnectionState State { get; }
 
+    ConnectionFailure? LastFailure { get; }
+
     event EventHandler<ConnectionState>? StateChanged;
     event EventHandler<TerminalOutputEventArgs>? OutputReceived;
 

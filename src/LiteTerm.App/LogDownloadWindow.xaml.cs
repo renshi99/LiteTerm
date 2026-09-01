@@ -64,9 +64,9 @@ public partial class LogDownloadWindow : Window, ITabOwnedWindow
         {
             // 关闭窗口或所属标签会取消连接与下载。
         }
-        catch (Exception exception) when (!_lifetimeCancellation.IsCancellationRequested)
+        catch (Exception) when (!_lifetimeCancellation.IsCancellationRequested)
         {
-            ShowFailure("无法建立独立 SFTP 连接。", exception);
+            ShowFailure("无法建立独立 SFTP 连接。");
         }
         catch (Exception)
         {
@@ -107,10 +107,10 @@ public partial class LogDownloadWindow : Window, ITabOwnedWindow
                 StatusText.Text = "临时文件已清理，已有目标文件未被替换。";
             }
         }
-        catch (Exception exception) when (!_lifetimeCancellation.IsCancellationRequested)
+        catch (Exception) when (!_lifetimeCancellation.IsCancellationRequested)
         {
             _transferStopwatch.Stop();
-            ShowFailure("日志下载失败。", exception);
+            ShowFailure("日志下载失败。");
         }
         catch (Exception)
         {
@@ -176,13 +176,14 @@ public partial class LogDownloadWindow : Window, ITabOwnedWindow
             $"{snapshot.Percentage:N0}% · {FormatBytes(bytesPerSecond)}/s";
     }
 
-    private void ShowFailure(string message, Exception exception)
+    private void ShowFailure(string message)
     {
+        var safeMessage = _session.LastFailure?.UserMessage ?? message;
         TransferTitleText.Text = "日志下载失败";
-        StatusText.Text = $"{message} {exception.Message}";
+        StatusText.Text = safeMessage;
         CancelButton.IsEnabled = false;
         MessageBox.Show(this,
-            $"{message}\n\n{exception.Message}",
+            safeMessage,
             "下载日志",
             MessageBoxButton.OK,
             MessageBoxImage.Error);

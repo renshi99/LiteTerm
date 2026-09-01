@@ -38,9 +38,14 @@ public partial class SftpWindow : Window, ITabOwnedWindow
 
         InitializeComponent();
         Title = $"SFTP - {options.Username}@{options.Host}";
+        _session.StateChanged += Session_StateChanged;
         Loaded += SftpWindow_Loaded;
         Closing += SftpWindow_Closing;
-        Closed += (_, _) => _closedCompletion.TrySetResult();
+        Closed += (_, _) =>
+        {
+            _session.StateChanged -= Session_StateChanged;
+            _closedCompletion.TrySetResult();
+        };
     }
 
     private async void SftpWindow_Loaded(object sender, RoutedEventArgs e)
@@ -56,11 +61,13 @@ public partial class SftpWindow : Window, ITabOwnedWindow
         {
             // 窗口关闭会取消尚未完成的连接或目录读取。
         }
-        catch (Exception exception)
+        catch (Exception)
         {
-            SetBusy(false, "SFTP 连接失败");
+            var message = _session.LastFailure?.UserMessage
+                ?? "无法建立 SFTP 连接或读取初始目录，请检查远程路径和权限。";
+            SetBusy(false, message);
             MessageBox.Show(this,
-                $"无法建立 SFTP 连接或读取初始目录。\n\n{exception.Message}",
+                message,
                 "SFTP", MessageBoxButton.OK, MessageBoxImage.Error);
         }
     }
@@ -80,11 +87,12 @@ public partial class SftpWindow : Window, ITabOwnedWindow
         {
             // 窗口正在关闭。
         }
-        catch (Exception exception)
+        catch (Exception)
         {
             SetBusy(false, $"无法读取 {normalizedPath}");
             MessageBox.Show(this,
-                $"无法读取远程目录。\n\n{exception.Message}",
+                _session.LastFailure?.UserMessage
+                ?? "无法读取远程目录，请检查路径和远程权限。",
                 "SFTP", MessageBoxButton.OK, MessageBoxImage.Error);
         }
     }
@@ -479,13 +487,14 @@ public partial class SftpWindow : Window, ITabOwnedWindow
 
             return false;
         }
-        catch (Exception exception)
+        catch (Exception)
         {
             _transferStopwatch.Stop();
             TransferTitleText.Text = "传输失败";
             SetBusy(false, "传输失败");
             MessageBox.Show(this,
-                $"文件传输失败。\n\n{exception.Message}",
+                _session.LastFailure?.UserMessage
+                ?? "文件传输失败，请检查本地路径、远程权限和可用空间。",
                 "SFTP", MessageBoxButton.OK, MessageBoxImage.Error);
             return false;
         }
@@ -523,11 +532,11 @@ public partial class SftpWindow : Window, ITabOwnedWindow
             ShowPathConflict(exception.Path);
             return false;
         }
-        catch (Exception exception)
+        catch (Exception)
         {
             SetBusy(false, "远程操作失败");
             MessageBox.Show(this,
-                $"{errorMessage}\n\n{exception.Message}",
+                _session.LastFailure?.UserMessage ?? errorMessage,
                 "SFTP",
                 MessageBoxButton.OK,
                 MessageBoxImage.Error);
@@ -671,6 +680,22 @@ public partial class SftpWindow : Window, ITabOwnedWindow
         NewDirectoryButton.IsEnabled = enabled;
         UpdateActionButtons();
         StatusText.Text = status;
+    }
+
+    private void Session_StateChanged(object? sender, ConnectionState state)
+    {
+        if (state != ConnectionState.Failed)
+        {
+            return;
+        }
+
+        _ = Dispatcher.InvokeAsync(() =>
+        {
+            if (!_shutdownStarted)
+            {
+                SetBusy(false, _session.LastFailure?.UserMessage ?? "SFTP 连接已中断。");
+            }
+        });
     }
 
     private void UpdateActionButtons()
