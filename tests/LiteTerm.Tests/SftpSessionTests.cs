@@ -1,3 +1,6 @@
+using System.Net;
+using System.Net.Sockets;
+using LiteTerm.Core.Connections;
 using LiteTerm.Core.Sftp;
 using LiteTerm.Infrastructure.Sftp;
 
@@ -5,6 +8,43 @@ namespace LiteTerm.Tests;
 
 public sealed class SftpSessionTests
 {
+    [Fact]
+    public async Task DisposeAsync_WhenCalledConcurrentlyDuringConnect_CompletesAllCalls()
+    {
+        var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var session = new SftpSession();
+        using var cancellation = new CancellationTokenSource();
+        try
+        {
+            var connectTask = session.ConnectAsync(
+                CreateOptions(listener),
+                _ => true,
+                cancellation.Token);
+            using var acceptedClient = await listener.AcceptTcpClientAsync()
+                .WaitAsync(TimeSpan.FromSeconds(5));
+
+            var disposeTasks = Enumerable.Range(0, 8)
+                .Select(_ => session.DisposeAsync().AsTask())
+                .ToArray();
+            cancellation.Cancel();
+
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+                await connectTask.WaitAsync(TimeSpan.FromSeconds(5)));
+            await Task.WhenAll(disposeTasks).WaitAsync(TimeSpan.FromSeconds(5));
+
+            Assert.Equal(ConnectionState.Disconnected, session.State);
+            await Assert.ThrowsAsync<ObjectDisposedException>(() =>
+                session.ListDirectoryAsync("/"));
+        }
+        finally
+        {
+            cancellation.Cancel();
+            await session.DisposeAsync();
+            listener.Stop();
+        }
+    }
+
     [Fact]
     public async Task ListDirectoryAsync_BeforeConnect_ThrowsInvalidOperationException()
     {
@@ -123,4 +163,13 @@ public sealed class SftpSessionTests
 
         Assert.Equal("不能重命名远程根目录或当前工作目录。", exception.Message);
     }
+
+    private static SshConnectionOptions CreateOptions(TcpListener listener) => new()
+    {
+        Host = IPAddress.Loopback.ToString(),
+        Port = ((IPEndPoint)listener.LocalEndpoint).Port,
+        Username = "test-user",
+        Password = "test-password",
+        ConnectTimeout = TimeSpan.FromSeconds(30)
+    };
 }

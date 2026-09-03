@@ -12,9 +12,11 @@ public sealed class SshTerminalSession : ISshTerminalSession
 {
     private readonly SemaphoreSlim _lifecycleLock = new(1, 1);
     private readonly IConnectionDiagnosticLogger _diagnosticLogger;
+    private readonly TaskCompletionSource _disposeCompletion = new(
+        TaskCreationOptions.RunContinuationsAsynchronously);
     private SshClient? _client;
     private ShellStream? _shell;
-    private bool _disposed;
+    private int _disposeStarted;
 
     public ConnectionState State { get; private set; } = ConnectionState.Disconnected;
 
@@ -35,7 +37,7 @@ public sealed class SshTerminalSession : ISshTerminalSession
         int rows,
         CancellationToken cancellationToken = default)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ObjectDisposedException.ThrowIf(IsDisposingOrDisposed, this);
         options.Validate();
         ArgumentNullException.ThrowIfNull(hostKeyVerifier);
 
@@ -108,7 +110,7 @@ public sealed class SshTerminalSession : ISshTerminalSession
 
     public async ValueTask SendAsync(string data, CancellationToken cancellationToken = default)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ObjectDisposedException.ThrowIf(IsDisposingOrDisposed, this);
         var shell = _shell;
         if (State != ConnectionState.Connected || shell is null)
         {
@@ -151,7 +153,7 @@ public sealed class SshTerminalSession : ISshTerminalSession
 
     public async Task DisconnectAsync(CancellationToken cancellationToken = default)
     {
-        if (_disposed || State == ConnectionState.Disconnected)
+        if (IsDisposingOrDisposed || State == ConnectionState.Disconnected)
         {
             return;
         }
@@ -170,16 +172,14 @@ public sealed class SshTerminalSession : ISshTerminalSession
         }
     }
 
-    public async ValueTask DisposeAsync()
+    public ValueTask DisposeAsync()
     {
-        if (_disposed)
+        if (Interlocked.CompareExchange(ref _disposeStarted, 1, 0) == 0)
         {
-            return;
+            _ = DisposeCoreAsync();
         }
 
-        await DisconnectAsync().ConfigureAwait(false);
-        _disposed = true;
-        _lifecycleLock.Dispose();
+        return new ValueTask(_disposeCompletion.Task);
     }
 
     private void OnShellDataReceived(object? sender, ShellDataEventArgs eventArgs)
@@ -194,7 +194,7 @@ public sealed class SshTerminalSession : ISshTerminalSession
 
     private async Task TransitionToFailedAsync(Exception exception, ConnectionOperation operation)
     {
-        if (_disposed)
+        if (IsDisposingOrDisposed)
         {
             return;
         }
@@ -228,6 +228,55 @@ public sealed class SshTerminalSession : ISshTerminalSession
     {
         State = state;
         StateChanged?.Invoke(this, state);
+    }
+
+    private bool IsDisposingOrDisposed => Volatile.Read(ref _disposeStarted) != 0;
+
+    private async Task DisposeCoreAsync()
+    {
+        Exception? failure = null;
+        try
+        {
+            await _lifecycleLock.WaitAsync().ConfigureAwait(false);
+            try
+            {
+                if (State != ConnectionState.Disconnected)
+                {
+                    SetState(ConnectionState.Disconnecting);
+                    await Task.Run(DisposeConnection, CancellationToken.None).ConfigureAwait(false);
+                    LastFailure = null;
+                    SetState(ConnectionState.Disconnected);
+                }
+            }
+            finally
+            {
+                _lifecycleLock.Release();
+            }
+        }
+        catch (Exception exception)
+        {
+            failure = exception;
+        }
+        finally
+        {
+            try
+            {
+                _lifecycleLock.Dispose();
+            }
+            catch (Exception exception)
+            {
+                failure ??= exception;
+            }
+
+            if (failure is null)
+            {
+                _disposeCompletion.TrySetResult();
+            }
+            else
+            {
+                _disposeCompletion.TrySetException(failure);
+            }
+        }
     }
 
     private async ValueTask SetFailureAsync(

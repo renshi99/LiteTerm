@@ -15,8 +15,10 @@ public sealed class SftpSession : ISftpSession
     private static readonly TimeSpan CleanupTimeout = TimeSpan.FromSeconds(5);
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly IConnectionDiagnosticLogger _diagnosticLogger;
+    private readonly TaskCompletionSource _disposeCompletion = new(
+        TaskCreationOptions.RunContinuationsAsynchronously);
     private SftpClient? _client;
-    private bool _disposed;
+    private int _disposeStarted;
 
     public ConnectionState State { get; private set; } = ConnectionState.Disconnected;
 
@@ -36,7 +38,7 @@ public sealed class SftpSession : ISftpSession
         Func<HostKeyInfo, bool> hostKeyVerifier,
         CancellationToken cancellationToken = default)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ObjectDisposedException.ThrowIf(IsDisposingOrDisposed, this);
         options.Validate();
         ArgumentNullException.ThrowIfNull(hostKeyVerifier);
 
@@ -98,7 +100,7 @@ public sealed class SftpSession : ISftpSession
         string path,
         CancellationToken cancellationToken = default)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ObjectDisposedException.ThrowIf(IsDisposingOrDisposed, this);
         var normalizedPath = RemotePath.Normalize(path);
 
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -140,7 +142,7 @@ public sealed class SftpSession : ISftpSession
         IProgress<SftpTransferProgress>? progress = null,
         CancellationToken cancellationToken = default)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ObjectDisposedException.ThrowIf(IsDisposingOrDisposed, this);
         ArgumentException.ThrowIfNullOrWhiteSpace(localPath);
         ValidateConflictPolicy(conflictPolicy);
         var normalizedRemotePath = RemotePath.Normalize(remotePath);
@@ -220,7 +222,7 @@ public sealed class SftpSession : ISftpSession
         IProgress<SftpTransferProgress>? progress = null,
         CancellationToken cancellationToken = default)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ObjectDisposedException.ThrowIf(IsDisposingOrDisposed, this);
         ArgumentException.ThrowIfNullOrWhiteSpace(localPath);
         ValidateConflictPolicy(conflictPolicy);
         var normalizedRemotePath = RemotePath.Normalize(remotePath);
@@ -309,7 +311,7 @@ public sealed class SftpSession : ISftpSession
         string path,
         CancellationToken cancellationToken = default)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ObjectDisposedException.ThrowIf(IsDisposingOrDisposed, this);
         var normalizedPath = RemotePath.Normalize(path);
 
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -334,7 +336,7 @@ public sealed class SftpSession : ISftpSession
         string destinationPath,
         CancellationToken cancellationToken = default)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ObjectDisposedException.ThrowIf(IsDisposingOrDisposed, this);
         var normalizedSourcePath = RemotePath.Normalize(sourcePath);
         var normalizedDestinationPath = RemotePath.Normalize(destinationPath);
         if (normalizedSourcePath is "/" or ".")
@@ -377,7 +379,7 @@ public sealed class SftpSession : ISftpSession
         string path,
         CancellationToken cancellationToken = default)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ObjectDisposedException.ThrowIf(IsDisposingOrDisposed, this);
         var normalizedPath = RemotePath.Normalize(path);
 
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -403,7 +405,7 @@ public sealed class SftpSession : ISftpSession
         string path,
         CancellationToken cancellationToken = default)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ObjectDisposedException.ThrowIf(IsDisposingOrDisposed, this);
         var normalizedPath = RemotePath.Normalize(path);
         if (normalizedPath is "/" or ".")
         {
@@ -436,7 +438,7 @@ public sealed class SftpSession : ISftpSession
 
     public async Task DisconnectAsync(CancellationToken cancellationToken = default)
     {
-        if (_disposed || State == ConnectionState.Disconnected)
+        if (IsDisposingOrDisposed || State == ConnectionState.Disconnected)
         {
             return;
         }
@@ -455,16 +457,14 @@ public sealed class SftpSession : ISftpSession
         }
     }
 
-    public async ValueTask DisposeAsync()
+    public ValueTask DisposeAsync()
     {
-        if (_disposed)
+        if (Interlocked.CompareExchange(ref _disposeStarted, 1, 0) == 0)
         {
-            return;
+            _ = DisposeCoreAsync();
         }
 
-        await DisconnectAsync().ConfigureAwait(false);
-        _disposed = true;
-        _gate.Dispose();
+        return new ValueTask(_disposeCompletion.Task);
     }
 
     private static RemoteFileEntry MapEntry(ISftpFile file)
@@ -654,6 +654,55 @@ public sealed class SftpSession : ISftpSession
         StateChanged?.Invoke(this, state);
     }
 
+    private bool IsDisposingOrDisposed => Volatile.Read(ref _disposeStarted) != 0;
+
+    private async Task DisposeCoreAsync()
+    {
+        Exception? failure = null;
+        try
+        {
+            await _gate.WaitAsync().ConfigureAwait(false);
+            try
+            {
+                if (State != ConnectionState.Disconnected)
+                {
+                    SetState(ConnectionState.Disconnecting);
+                    DisposeClient();
+                    LastFailure = null;
+                    SetState(ConnectionState.Disconnected);
+                }
+            }
+            finally
+            {
+                _gate.Release();
+            }
+        }
+        catch (Exception exception)
+        {
+            failure = exception;
+        }
+        finally
+        {
+            try
+            {
+                _gate.Dispose();
+            }
+            catch (Exception exception)
+            {
+                failure ??= exception;
+            }
+
+            if (failure is null)
+            {
+                _disposeCompletion.TrySetResult();
+            }
+            else
+            {
+                _disposeCompletion.TrySetException(failure);
+            }
+        }
+    }
+
     private void OnClientErrorOccurred(object? sender, ExceptionEventArgs eventArgs)
     {
         _ = TransitionToFailedAsync(eventArgs.Exception);
@@ -661,7 +710,7 @@ public sealed class SftpSession : ISftpSession
 
     private async Task TransitionToFailedAsync(Exception exception)
     {
-        if (_disposed)
+        if (IsDisposingOrDisposed)
         {
             return;
         }
