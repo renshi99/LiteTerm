@@ -1027,6 +1027,15 @@ public partial class MainWindow : Window
         }
     }
 
+    private void About_Click(object sender, RoutedEventArgs e)
+    {
+        var dialog = new AboutWindow
+        {
+            Owner = this
+        };
+        dialog.ShowDialog();
+    }
+
     private async void NewServer_Click(object sender, RoutedEventArgs e)
     {
         var dialog = new ServerProfileWindow { Owner = this };

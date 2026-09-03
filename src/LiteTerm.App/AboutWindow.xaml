@@ -1,0 +1,47 @@
+<Window x:Class="LiteTerm.App.AboutWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="关于 LiteTerm" Icon="Assets/LiteTerm.ico"
+        Width="440" Height="470" MinWidth="440" MinHeight="470"
+        ResizeMode="NoResize" ShowInTaskbar="False"
+        WindowStartupLocation="CenterOwner"
+        Background="{DynamicResource WindowBackgroundBrush}"
+        Foreground="{DynamicResource PrimaryTextBrush}">
+    <Border Margin="24" Padding="24"
+            Background="{DynamicResource PanelBackgroundBrush}"
+            BorderBrush="{DynamicResource BorderBrush}"
+            BorderThickness="1" CornerRadius="10">
+        <Grid>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+                <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
+
+            <Image Width="88" Height="88" Source="Assets/LiteTerm.ico"
+                   HorizontalAlignment="Center" />
+            <TextBlock Grid.Row="1" Text="LiteTerm" Margin="0,14,0,0"
+                       HorizontalAlignment="Center" FontSize="26" FontWeight="SemiBold" />
+            <TextBlock x:Name="VersionTextBlock" Grid.Row="2" Margin="0,4,0,0"
+                       HorizontalAlignment="Center" Foreground="{DynamicResource AccentTextBrush}" />
+            <Separator Grid.Row="3" Margin="0,20,0,16"
+                       Background="{DynamicResource SubtleBorderBrush}" />
+            <StackPanel Grid.Row="4">
+                <TextBlock Text="面向 Windows 的轻量 SSH/SFTP 客户端"
+                           HorizontalAlignment="Center" FontSize="14" />
+                <TextBlock Text="支持 SSH 终端、SFTP 文件管理、多标签会话和常用日志入口。"
+                           Margin="0,10,0,0" TextAlignment="Center" TextWrapping="Wrap"
+                           Foreground="{DynamicResource SecondaryTextBrush}" />
+                <TextBlock Text=".NET 10 · Windows 10/11 x64"
+                           Margin="0,10,0,0" HorizontalAlignment="Center"
+                           Foreground="{DynamicResource MutedTextBrush}" />
+            </StackPanel>
+            <Button Grid.Row="5" Content="关闭" Width="88" Height="34" Margin="0,20,0,0"
+                    HorizontalAlignment="Center" IsDefault="True" IsCancel="True"
+                    Click="Close_Click" />
+        </Grid>
+    </Border>
+</Window>

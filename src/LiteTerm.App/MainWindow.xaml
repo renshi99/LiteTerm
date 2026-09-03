@@ -3,7 +3,8 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:local="clr-namespace:LiteTerm.App"
         xmlns:wv2="clr-namespace:Microsoft.Web.WebView2.Wpf;assembly=Microsoft.Web.WebView2.Wpf"
-        Title="LiteTerm" Height="720" Width="1280" MinHeight="520" MinWidth="1050"
+        Title="LiteTerm" Icon="Assets/LiteTerm.ico"
+        Height="720" Width="1280" MinHeight="520" MinWidth="1050"
         WindowStartupLocation="CenterScreen" Background="{DynamicResource WindowBackgroundBrush}"
         Foreground="{DynamicResource PrimaryTextBrush}"
         PreviewKeyDown="MainWindow_PreviewKeyDown">
@@ -194,7 +195,8 @@
                             Click="QuickCommands_Click" IsEnabled="False" />
                     <Button Content="新建标签" Click="NewTerminalTab_Click"
                             ToolTip="新建终端标签 (Ctrl+Shift+T)" />
-                    <Button Content="外观设置" Click="TerminalAppearance_Click" Margin="0" />
+                    <Button Content="外观设置" Click="TerminalAppearance_Click" />
+                    <Button Content="关于" Click="About_Click" Margin="0" />
                 </StackPanel>
             </Grid>
         </Border>
