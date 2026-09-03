@@ -28,12 +28,14 @@ public partial class MainWindow : Window
     private readonly IApplicationAppearanceSettingsStore _appearanceSettingsStore;
     private readonly IQuickCommandStore _quickCommandStore;
     private readonly IServerLogEntryStore _serverLogEntryStore;
+    private readonly IConnectionDiagnosticLogger _diagnosticLogger;
     private readonly Func<ISftpSession> _sftpSessionFactory;
     private readonly List<TerminalTabContext> _terminalTabs = [];
     private readonly ObservableCollection<ServerProfile> _serverProfiles = [];
     private readonly ICollectionView _serverProfilesView;
     private ApplicationTheme _applicationTheme = ApplicationTheme.Dark;
     private TerminalAppearanceSettings _terminalAppearance = TerminalAppearanceSettings.Default;
+    private bool _updatingAutoReconnectControl;
     private bool _shutdownStarted;
     private bool _shutdownCompleted;
 
@@ -48,6 +50,7 @@ public partial class MainWindow : Window
         IApplicationAppearanceSettingsStore appearanceSettingsStore,
         IQuickCommandStore quickCommandStore,
         IServerLogEntryStore serverLogEntryStore,
+        IConnectionDiagnosticLogger diagnosticLogger,
         Func<ISftpSession> sftpSessionFactory)
     {
         ArgumentNullException.ThrowIfNull(sshSessionFactory);
@@ -56,6 +59,7 @@ public partial class MainWindow : Window
         ArgumentNullException.ThrowIfNull(appearanceSettingsStore);
         ArgumentNullException.ThrowIfNull(quickCommandStore);
         ArgumentNullException.ThrowIfNull(serverLogEntryStore);
+        ArgumentNullException.ThrowIfNull(diagnosticLogger);
         ArgumentNullException.ThrowIfNull(sftpSessionFactory);
         _sshSessionFactory = sshSessionFactory;
         _dataStore = dataStore;
@@ -63,6 +67,7 @@ public partial class MainWindow : Window
         _appearanceSettingsStore = appearanceSettingsStore;
         _quickCommandStore = quickCommandStore;
         _serverLogEntryStore = serverLogEntryStore;
+        _diagnosticLogger = diagnosticLogger;
         _sftpSessionFactory = sftpSessionFactory;
 
         InitializeComponent();
@@ -151,7 +156,10 @@ public partial class MainWindow : Window
         if (tab is null || tab.HasConnectionHistory || tab.Session.State != ConnectionState.Disconnected)
         {
             tab = AddTerminalTab();
-            await InitializeTerminalAsync(tab);
+            if (!await InitializeTerminalAsync(tab))
+            {
+                return;
+            }
         }
 
         await ConnectTabAsync(tab, options, savedProfile, credentialToSave);
@@ -161,8 +169,15 @@ public partial class MainWindow : Window
         TerminalTabContext tab,
         SshConnectionOptions options,
         ServerProfile? savedProfile = null,
-        ServerCredential? credentialToSave = null)
+        ServerCredential? credentialToSave = null,
+        bool isAutomaticReconnect = false,
+        CancellationToken cancellationToken = default)
     {
+        if (!isAutomaticReconnect)
+        {
+            await tab.StopAutoReconnectAsync();
+        }
+
         if (!_terminalTabs.Contains(tab)
             || tab.Session.State is ConnectionState.Connecting or ConnectionState.Connected
                 or ConnectionState.Disconnecting)
@@ -172,23 +187,15 @@ public partial class MainWindow : Window
 
         if (!tab.TerminalReady)
         {
-            try
-            {
-                await tab.WaitForTerminalReadyAsync(TimeSpan.FromSeconds(5));
-            }
-            catch (TimeoutException)
-            {
-                MessageBox.Show(this, "终端初始化超时，请关闭该标签后重试。", "LiteTerm",
-                    MessageBoxButton.OK, MessageBoxImage.Warning);
-                return;
-            }
-            catch (OperationCanceledException)
+            if (!await InitializeTerminalAsync(tab))
             {
                 return;
             }
         }
 
-        var connectionCancellation = new CancellationTokenSource();
+        using var connectionCancellation = CancellationTokenSource.CreateLinkedTokenSource(
+            tab.LifetimeToken,
+            cancellationToken);
         var connected = false;
         tab.ConnectionCancellation = connectionCancellation;
         tab.HasConnectionHistory = true;
@@ -199,7 +206,10 @@ public partial class MainWindow : Window
         UpdateTabHeader(tab);
         try
         {
-            SetConnectionControls(false, true, "取消连接");
+            if (ReferenceEquals(tab, CurrentTab))
+            {
+                SetConnectionControls(false, true, "取消连接");
+            }
             await tab.Session.ConnectAsync(
                 options,
                 hostKey => VerifyHostKey(options, hostKey),
@@ -213,13 +223,17 @@ public partial class MainWindow : Window
                 return;
             }
 
-            tab.WebView.Focus();
+            if (ReferenceEquals(tab, CurrentTab))
+            {
+                tab.WebView.Focus();
+            }
             tab.ActiveConnectionOptions = options;
+            tab.HasSuccessfulConnection = true;
             connected = true;
         }
         catch (OperationCanceledException) when (connectionCancellation.IsCancellationRequested)
         {
-            if (ReferenceEquals(tab, CurrentTab))
+            if (!isAutomaticReconnect && ReferenceEquals(tab, CurrentTab))
             {
                 SetStatus("已取消连接", "#9CA3AF");
                 SetConnectionControls(true);
@@ -234,10 +248,13 @@ public partial class MainWindow : Window
                     SetConnectionControls(true);
                 }
 
-                MessageBox.Show(this,
-                    tab.Session.LastFailure?.UserMessage
-                    ?? "无法建立 SSH 连接，请检查连接信息后重试。",
-                    "连接失败", MessageBoxButton.OK, MessageBoxImage.Error);
+                if (!isAutomaticReconnect)
+                {
+                    MessageBox.Show(this,
+                        tab.Session.LastFailure?.UserMessage
+                        ?? "无法建立 SSH 连接，请检查连接信息后重试。",
+                        "连接失败", MessageBoxButton.OK, MessageBoxImage.Error);
+                }
             }
         }
         finally
@@ -246,8 +263,6 @@ public partial class MainWindow : Window
             {
                 tab.ConnectionCancellation = null;
             }
-
-            connectionCancellation.Dispose();
         }
 
         if (connected && savedProfile is not null)
@@ -266,7 +281,10 @@ public partial class MainWindow : Window
                         credentialToSave with { ServerId = connectedProfile.Id });
                 }
 
-                await RefreshServerProfilesAsync(connectedProfile.Id);
+                var selectedProfileId = ReferenceEquals(tab, CurrentTab)
+                    ? connectedProfile.Id
+                    : (ServerList.SelectedItem as ServerProfile)?.Id;
+                await RefreshServerProfilesAsync(selectedProfileId);
                 tab.ActiveServerProfileId = connectedProfile.Id;
                 tab.LastServerProfileId = connectedProfile.Id;
                 if (ReferenceEquals(tab, CurrentTab))
@@ -284,8 +302,11 @@ public partial class MainWindow : Window
                 var message = credentialToSave is null
                     ? "连接已建立，但无法更新最近连接时间。"
                     : "连接已建立，但无法保存至本地连接。";
-                MessageBox.Show(this, message,
-                    "服务器管理", MessageBoxButton.OK, MessageBoxImage.Warning);
+                if (!isAutomaticReconnect)
+                {
+                    MessageBox.Show(this, message,
+                        "服务器管理", MessageBoxButton.OK, MessageBoxImage.Warning);
+                }
             }
         }
     }
@@ -343,41 +364,129 @@ public partial class MainWindow : Window
         return panel;
     }
 
-    private async Task InitializeTerminalAsync(TerminalTabContext tab)
+    private Task<bool> InitializeTerminalAsync(TerminalTabContext tab)
     {
-        if (tab.WebView.CoreWebView2 is not null)
+        if (tab.TerminalReady)
         {
-            return;
+            return Task.FromResult(true);
+        }
+
+        if (tab.TerminalInitializationTask is { IsCompleted: false } currentInitialization)
+        {
+            return currentInitialization;
+        }
+
+        var initialization = InitializeTerminalCoreAsync(tab);
+        tab.TerminalInitializationTask = initialization;
+        return initialization;
+    }
+
+    private async Task<bool> InitializeTerminalCoreAsync(TerminalTabContext tab)
+    {
+        tab.BeginTerminalInitialization();
+        if (ReferenceEquals(tab, CurrentTab))
+        {
+            UpdateCurrentTabState(tab);
         }
 
         try
         {
-            await tab.WebView.EnsureCoreWebView2Async();
+            if (tab.WebView.CoreWebView2 is null)
+            {
+                await tab.WebView.EnsureCoreWebView2Async();
+            }
+
             var coreWebView = tab.WebView.CoreWebView2
                 ?? throw new InvalidOperationException("WebView2 初始化未返回核心实例。");
             coreWebView.Settings.AreDevToolsEnabled = false;
             coreWebView.Settings.IsStatusBarEnabled = false;
             coreWebView.Settings.AreBrowserAcceleratorKeysEnabled = false;
+            coreWebView.WebMessageReceived -= Terminal_WebMessageReceived;
+            coreWebView.NavigationStarting -= Terminal_NavigationStarting;
             coreWebView.WebMessageReceived += Terminal_WebMessageReceived;
             coreWebView.NavigationStarting += Terminal_NavigationStarting;
-            tab.WebView.Source = new Uri(Path.Combine(AppContext.BaseDirectory, "Terminal", "index.html"));
+            var terminalPage = new Uri(Path.Combine(AppContext.BaseDirectory, "Terminal", "index.html"));
+            coreWebView.Navigate(terminalPage.AbsoluteUri);
+            return await tab.WaitForTerminalReadyAsync(TimeSpan.FromSeconds(5));
+        }
+        catch (OperationCanceledException) when (tab.LifetimeToken.IsCancellationRequested)
+        {
+            return false;
+        }
+        catch (Exception) when (tab.LifetimeToken.IsCancellationRequested)
+        {
+            return false;
         }
         catch (Exception exception)
         {
-            if (ReferenceEquals(tab, CurrentTab))
-            {
-                SetStatus($"终端初始化失败：{exception.Message}", "#EF4444");
-            }
-            MessageBox.Show(this,
-                "无法初始化 WebView2 终端。请确认系统已安装 WebView2 Runtime。\n\n" + exception.Message,
-                "LiteTerm", MessageBoxButton.OK, MessageBoxImage.Error);
+            await HandleTerminalInitializationFailureAsync(tab, exception);
+            return false;
         }
+    }
+
+    private async Task HandleTerminalInitializationFailureAsync(TerminalTabContext tab, Exception exception)
+    {
+        var runtimeMissing = ContainsExceptionType(exception, "WebView2RuntimeNotFoundException");
+        var failure = new TerminalInitializationFailure(exception is TimeoutException
+            ? TerminalInitializationFailureKind.Timeout
+            : runtimeMissing
+                ? TerminalInitializationFailureKind.RuntimeMissing
+                : TerminalInitializationFailureKind.Unknown);
+        tab.MarkTerminalInitializationFailed(failure);
+
+        if (ReferenceEquals(tab, CurrentTab))
+        {
+            UpdateCurrentTabState(tab);
+        }
+
+        try
+        {
+            await _diagnosticLogger.WriteAsync(new ConnectionDiagnosticEntry(
+                DateTimeOffset.UtcNow,
+                ConnectionProtocol.Terminal,
+                ConnectionOperation.Initialize,
+                failure.Code,
+                exception.GetType().FullName ?? exception.GetType().Name));
+        }
+        catch
+        {
+            // 诊断日志不可用时仍需保留安全提示和重试入口。
+        }
+
+        if (!_terminalTabs.Contains(tab))
+        {
+            return;
+        }
+
+        MessageBox.Show(this, failure.UserMessage, "终端初始化失败",
+            MessageBoxButton.OK, MessageBoxImage.Error);
+    }
+
+    private static bool ContainsExceptionType(Exception exception, string typeName)
+    {
+        for (Exception? current = exception; current is not null; current = current.InnerException)
+        {
+            if (string.Equals(current.GetType().Name, typeName, StringComparison.Ordinal))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private async void NewTerminalTab_Click(object sender, RoutedEventArgs e)
     {
         var tab = AddTerminalTab();
         if (IsLoaded)
+        {
+            await InitializeTerminalAsync(tab);
+        }
+    }
+
+    private async void RetryTerminal_Click(object sender, RoutedEventArgs e)
+    {
+        if (CurrentTab is { } tab)
         {
             await InitializeTerminalAsync(tab);
         }
@@ -469,11 +578,21 @@ public partial class MainWindow : Window
                 SetConnectionControls(false);
                 break;
             case ConnectionState.Failed:
-                SetStatus(tab.Session.LastFailure?.UserMessage ?? "连接失败", "#EF4444");
+                SetStatus(
+                    tab.AutoReconnectTask is { IsCompleted: false } && tab.AutoReconnectAttemptCount > 0
+                        ? $"正在等待自动重连（{tab.AutoReconnectAttemptCount}/{TerminalAutoReconnectPolicy.MaximumAttempts}）…"
+                        : tab.Session.LastFailure?.UserMessage ?? "连接失败",
+                    tab.AutoReconnectTask is { IsCompleted: false } ? "#F59E0B" : "#EF4444");
                 SetConnectionControls(true);
                 break;
             default:
-                SetStatus(tab.TerminalReady ? "终端已就绪" : "正在初始化终端…", "#9CA3AF");
+                SetStatus(tab.TerminalInitializationState == TerminalInitializationState.Failed
+                    ? tab.LastTerminalInitializationFailure?.UserMessage
+                      ?? "终端组件初始化失败，请重试终端。"
+                    : tab.TerminalReady
+                        ? "终端已就绪"
+                        : "正在初始化终端…",
+                    tab.TerminalInitializationState == TerminalInitializationState.Failed ? "#EF4444" : "#9CA3AF");
                 SetConnectionControls(true);
                 break;
         }
@@ -609,7 +728,7 @@ public partial class MainWindow : Window
                     ApplyTerminalAppearance(tab);
                     if (ReferenceEquals(tab, CurrentTab))
                     {
-                        SetStatus("终端已就绪", "#9CA3AF");
+                        UpdateCurrentTabState(tab);
                     }
                     break;
                 case "input" when root.TryGetProperty("data", out var dataElement):
@@ -671,6 +790,27 @@ public partial class MainWindow : Window
             ? _serverProfiles.FirstOrDefault(profile => profile.Id == serverId)
             : null;
         await ConnectTabAsync(tab, options, savedProfile);
+    }
+
+    private async void AutoReconnect_Changed(object sender, RoutedEventArgs e)
+    {
+        if (_updatingAutoReconnectControl || CurrentTab is not { } tab)
+        {
+            return;
+        }
+
+        tab.AutoReconnectEnabled = AutoReconnectCheckBox.IsChecked == true;
+        if (!tab.AutoReconnectEnabled)
+        {
+            await tab.StopAutoReconnectAsync();
+            if (_terminalTabs.Contains(tab) && ReferenceEquals(tab, CurrentTab))
+            {
+                UpdateCurrentTabState(tab);
+            }
+            return;
+        }
+
+        TryStartAutoReconnect(tab);
     }
 
     private void Sftp_Click(object sender, RoutedEventArgs e)
@@ -1252,6 +1392,10 @@ public partial class MainWindow : Window
             UpdateTabHeader(tab);
             if (!ReferenceEquals(tab, CurrentTab))
             {
+                if (state == ConnectionState.Failed)
+                {
+                    TryStartAutoReconnect(tab);
+                }
                 return;
             }
 
@@ -1279,12 +1423,139 @@ public partial class MainWindow : Window
                     SetConnectionControls(true);
                     break;
             }
+
+            if (state == ConnectionState.Failed)
+            {
+                TryStartAutoReconnect(tab);
+            }
+
         });
+    }
+
+    private void TryStartAutoReconnect(TerminalTabContext tab)
+    {
+        if (tab.AutoReconnectTask is { IsCompleted: false }
+            || !TerminalAutoReconnectPolicy.CanSchedule(
+                tab.AutoReconnectEnabled,
+                tab.Session.State,
+                tab.LastConnectionOptions is not null,
+                tab.HasSuccessfulConnection,
+                tab.Session.LastFailure,
+                tab.AutoReconnectAttemptCount))
+        {
+            return;
+        }
+
+        var cancellation = CancellationTokenSource.CreateLinkedTokenSource(tab.LifetimeToken);
+        tab.AutoReconnectCancellation = cancellation;
+        tab.AutoReconnectTask = RunAutoReconnectLoopAsync(tab, cancellation);
+    }
+
+    private async Task RunAutoReconnectLoopAsync(
+        TerminalTabContext tab,
+        CancellationTokenSource cancellation)
+    {
+        try
+        {
+            while (TerminalAutoReconnectPolicy.CanSchedule(
+                       tab.AutoReconnectEnabled,
+                       tab.Session.State,
+                       tab.LastConnectionOptions is not null,
+                       tab.HasSuccessfulConnection,
+                       tab.Session.LastFailure,
+                       tab.AutoReconnectAttemptCount))
+            {
+                var attempt = ++tab.AutoReconnectAttemptCount;
+                var delay = TerminalAutoReconnectPolicy.GetDelay(attempt);
+                if (ReferenceEquals(tab, CurrentTab))
+                {
+                    SetStatus(
+                        $"连接已中断，{delay.TotalSeconds:0} 秒后自动重连（{attempt}/{TerminalAutoReconnectPolicy.MaximumAttempts}）…",
+                        "#F59E0B");
+                }
+
+                await Task.Delay(delay, cancellation.Token);
+                cancellation.Token.ThrowIfCancellationRequested();
+                if (!_terminalTabs.Contains(tab)
+                    || tab.LastConnectionOptions is not { } options)
+                {
+                    return;
+                }
+
+                var savedProfile = tab.LastServerProfileId is { } serverId
+                    ? _serverProfiles.FirstOrDefault(profile => profile.Id == serverId)
+                    : null;
+                tab.IsAutomaticReconnectAttempt = true;
+                try
+                {
+                    await ConnectTabAsync(
+                        tab,
+                        options,
+                        savedProfile,
+                        isAutomaticReconnect: true,
+                        cancellationToken: cancellation.Token);
+                }
+                finally
+                {
+                    tab.IsAutomaticReconnectAttempt = false;
+                }
+
+                if (tab.Session.State == ConnectionState.Connected)
+                {
+                    tab.AutoReconnectAttemptCount = 0;
+                    return;
+                }
+            }
+
+            if (_terminalTabs.Contains(tab)
+                && ReferenceEquals(tab, CurrentTab)
+                && tab.AutoReconnectEnabled
+                && tab.Session.State == ConnectionState.Failed
+                && tab.AutoReconnectAttemptCount >= TerminalAutoReconnectPolicy.MaximumAttempts)
+            {
+                SetStatus("自动重连已停止，请检查网络后手动重连。", "#EF4444");
+            }
+        }
+        catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+        {
+            // The user disabled auto reconnect, started a manual reconnect, or closed the tab.
+        }
+        catch (Exception exception)
+        {
+            try
+            {
+                await _diagnosticLogger.WriteAsync(new ConnectionDiagnosticEntry(
+                    DateTimeOffset.UtcNow,
+                    ConnectionProtocol.Ssh,
+                    ConnectionOperation.Connect,
+                    "auto_reconnect_loop_failed",
+                    exception.GetType().FullName ?? exception.GetType().Name));
+            }
+            catch
+            {
+                // A diagnostic failure must not surface as an unobserved reconnect task exception.
+            }
+
+            if (_terminalTabs.Contains(tab) && ReferenceEquals(tab, CurrentTab))
+            {
+                SetStatus("自动重连已停止，请手动重连。", "#EF4444");
+            }
+        }
+        finally
+        {
+            if (ReferenceEquals(tab.AutoReconnectCancellation, cancellation))
+            {
+                tab.AutoReconnectCancellation = null;
+                tab.AutoReconnectTask = null;
+            }
+
+            cancellation.Dispose();
+        }
     }
 
     private void SetConnectionControls(bool canConnect, bool canDisconnect = false, string disconnectButtonText = "断开")
     {
-        ConnectButton.IsEnabled = canConnect;
+        ConnectButton.IsEnabled = canConnect && CurrentTab?.TerminalReady == true;
         DisconnectButton.IsEnabled = canDisconnect;
         DisconnectButton.Content = disconnectButtonText;
         HostTextBox.IsEnabled = canConnect;
@@ -1296,6 +1567,14 @@ public partial class MainWindow : Window
         BrowsePrivateKeyButton.IsEnabled = canConnect;
         PrivateKeyPassphraseInput.IsEnabled = canConnect;
         SaveConnectionCheckBox.IsEnabled = canConnect;
+        _updatingAutoReconnectControl = true;
+        AutoReconnectCheckBox.IsChecked = CurrentTab?.AutoReconnectEnabled == true;
+        AutoReconnectCheckBox.IsEnabled = CurrentTab?.TerminalReady == true;
+        _updatingAutoReconnectControl = false;
+        RetryTerminalButton.Visibility = CurrentTab?.TerminalInitializationState == TerminalInitializationState.Failed
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+        RetryTerminalButton.IsEnabled = CurrentTab?.TerminalInitializationState == TerminalInitializationState.Failed;
         ReconnectButton.IsEnabled = CurrentTab is { } currentTab
                                     && TerminalReconnectPolicy.CanReconnect(
                                         currentTab.Session.State,

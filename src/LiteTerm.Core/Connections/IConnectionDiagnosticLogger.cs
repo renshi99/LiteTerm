@@ -1,7 +1,7 @@
 namespace LiteTerm.Core.Connections;
 
 /// <summary>
-/// 写入不含主机、用户名、路径和凭据的连接诊断事件。
+/// 写入不含主机、用户名、路径和凭据的连接与终端诊断事件。
 /// </summary>
 public interface IConnectionDiagnosticLogger
 {
@@ -20,7 +20,8 @@ public sealed record ConnectionDiagnosticEntry(
 public enum ConnectionProtocol
 {
     Ssh,
-    Sftp
+    Sftp,
+    Terminal
 }
 
 public enum ConnectionOperation
@@ -28,5 +29,6 @@ public enum ConnectionOperation
     Connect,
     Transport,
     Send,
-    Resize
+    Resize,
+    Initialize
 }

@@ -15,7 +15,7 @@ internal sealed class TerminalTabContext : IAsyncDisposable
     private const int MaximumOutputBatchBytes = 64 * 1024;
     private readonly DispatcherTimer _outputTimer;
     private readonly List<ITabOwnedWindow> _ownedWindows = [];
-    private readonly TaskCompletionSource _terminalReadyCompletion = new(
+    private TaskCompletionSource _terminalReadyCompletion = new(
         TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly CancellationTokenSource _lifetimeCancellation = new();
     private int _disposed;
@@ -39,6 +39,8 @@ internal sealed class TerminalTabContext : IAsyncDisposable
     public CancellationToken LifetimeToken { get; }
     public BoundedTerminalOutputBuffer OutputBuffer { get; }
     public CancellationTokenSource? ConnectionCancellation { get; set; }
+    public CancellationTokenSource? AutoReconnectCancellation { get; set; }
+    public Task? AutoReconnectTask { get; set; }
     public SshConnectionOptions? ActiveConnectionOptions { get; set; }
     public Guid? ActiveServerProfileId { get; set; }
     public SshConnectionOptions? LastConnectionOptions { get; set; }
@@ -47,7 +49,14 @@ internal sealed class TerminalTabContext : IAsyncDisposable
     public int Columns { get; set; } = 80;
     public int Rows { get; set; } = 24;
     public bool TerminalReady { get; private set; }
+    public TerminalInitializationState TerminalInitializationState { get; private set; }
+    public TerminalInitializationFailure? LastTerminalInitializationFailure { get; private set; }
+    public Task<bool>? TerminalInitializationTask { get; set; }
     public bool HasConnectionHistory { get; set; }
+    public bool HasSuccessfulConnection { get; set; }
+    public bool AutoReconnectEnabled { get; set; }
+    public bool IsAutomaticReconnectAttempt { get; set; }
+    public int AutoReconnectAttemptCount { get; set; }
 
     public void EnqueueOutput(ReadOnlySpan<byte> data) => OutputBuffer.Enqueue(data);
 
@@ -58,14 +67,39 @@ internal sealed class TerminalTabContext : IAsyncDisposable
         window.Closed += (_, _) => _ownedWindows.Remove(window);
     }
 
+    public void BeginTerminalInitialization()
+    {
+        TerminalInitializationState = TerminalInitializationState.Initializing;
+        LastTerminalInitializationFailure = null;
+        if (_terminalReadyCompletion.Task.IsCompleted)
+        {
+            _terminalReadyCompletion = new TaskCompletionSource(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+        }
+    }
+
     public void MarkTerminalReady()
     {
         TerminalReady = true;
+        TerminalInitializationState = TerminalInitializationState.Ready;
+        LastTerminalInitializationFailure = null;
         _terminalReadyCompletion.TrySetResult();
     }
 
-    public Task WaitForTerminalReadyAsync(TimeSpan timeout) =>
-        _terminalReadyCompletion.Task.WaitAsync(timeout);
+    public void MarkTerminalInitializationFailed(TerminalInitializationFailure failure)
+    {
+        ArgumentNullException.ThrowIfNull(failure);
+        TerminalReady = false;
+        TerminalInitializationState = TerminalInitializationState.Failed;
+        LastTerminalInitializationFailure = failure;
+        _terminalReadyCompletion.TrySetResult();
+    }
+
+    public async Task<bool> WaitForTerminalReadyAsync(TimeSpan timeout)
+    {
+        await _terminalReadyCompletion.Task.WaitAsync(timeout);
+        return TerminalReady;
+    }
 
     public void CancelConnection()
     {
@@ -76,6 +110,47 @@ internal sealed class TerminalTabContext : IAsyncDisposable
         catch (ObjectDisposedException)
         {
             // The connection attempt completed while the tab was being closed.
+        }
+    }
+
+    public void CancelAutoReconnect(bool resetAttemptCount = true)
+    {
+        try
+        {
+            AutoReconnectCancellation?.Cancel();
+        }
+        catch (ObjectDisposedException)
+        {
+            // The reconnect loop completed while another lifecycle action was cancelling it.
+        }
+
+        if (IsAutomaticReconnectAttempt)
+        {
+            CancelConnection();
+        }
+
+        if (resetAttemptCount)
+        {
+            AutoReconnectAttemptCount = 0;
+        }
+    }
+
+    public async Task StopAutoReconnectAsync(bool resetAttemptCount = true)
+    {
+        var reconnectTask = AutoReconnectTask;
+        CancelAutoReconnect(resetAttemptCount);
+        if (reconnectTask is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await reconnectTask;
+        }
+        catch (OperationCanceledException)
+        {
+            // Cancellation is the expected completion path for a pending reconnect loop.
         }
     }
 
@@ -120,6 +195,7 @@ internal sealed class TerminalTabContext : IAsyncDisposable
 
         CancelConnection();
         _lifetimeCancellation.Cancel();
+        await StopAutoReconnectAsync();
         _terminalReadyCompletion.TrySetCanceled();
         _outputTimer.Stop();
         try
@@ -132,6 +208,9 @@ internal sealed class TerminalTabContext : IAsyncDisposable
         {
             ConnectionCancellation?.Dispose();
             ConnectionCancellation = null;
+            AutoReconnectCancellation?.Dispose();
+            AutoReconnectCancellation = null;
+            AutoReconnectTask = null;
             ActiveConnectionOptions = null;
             ActiveServerProfileId = null;
             LastConnectionOptions = null;
@@ -140,4 +219,12 @@ internal sealed class TerminalTabContext : IAsyncDisposable
             WebView.Dispose();
         }
     }
+}
+
+internal enum TerminalInitializationState
+{
+    NotStarted,
+    Initializing,
+    Ready,
+    Failed
 }

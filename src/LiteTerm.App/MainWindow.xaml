@@ -144,7 +144,8 @@
                     <ComboBoxItem Content="密码" Tag="Password" />
                     <ComboBoxItem Content="私钥" Tag="PrivateKey" />
                 </ComboBox>
-                <Button x:Name="ConnectButton" Grid.Row="1" Grid.Column="4" Content="连接" Click="Connect_Click" IsDefault="True" />
+                <Button x:Name="ConnectButton" Grid.Row="1" Grid.Column="4" Content="连接" Click="Connect_Click"
+                        IsDefault="True" IsEnabled="False" />
                 <Button x:Name="DisconnectButton" Grid.Row="1" Grid.Column="5" Content="断开" Click="Disconnect_Click" IsEnabled="False" />
                 <Button x:Name="SftpButton" Grid.Row="1" Grid.Column="6" Content="SFTP" Click="Sftp_Click"
                         IsEnabled="False" Margin="0" />
@@ -179,8 +180,14 @@
 
                 <StackPanel Grid.Row="3" Grid.ColumnSpan="7" Orientation="Horizontal"
                             HorizontalAlignment="Right" Margin="0,8,0,0">
+                    <Button x:Name="RetryTerminalButton" Content="重试终端" Click="RetryTerminal_Click"
+                            Visibility="Collapsed" ToolTip="重新初始化当前标签的终端组件" />
                     <Button x:Name="ReconnectButton" Content="重连" Click="Reconnect_Click" IsEnabled="False"
                             ToolTip="在当前标签中使用上次连接参数重新连接" />
+                    <CheckBox x:Name="AutoReconnectCheckBox" Content="断线自动重连"
+                              Checked="AutoReconnect_Changed" Unchecked="AutoReconnect_Changed"
+                              VerticalAlignment="Center" Margin="8,0"
+                              ToolTip="当前标签连接中断后，最多自动重试 3 次；认证和主机身份错误不会重试" />
                     <Button x:Name="LogShortcutButton" Content="日志入口"
                             Click="ServerLogs_Click" IsEnabled="False" />
                     <Button x:Name="QuickCommandButton" Content="快捷命令"

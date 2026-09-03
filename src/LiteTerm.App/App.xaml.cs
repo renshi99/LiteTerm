@@ -36,6 +36,7 @@ public partial class App : System.Windows.Application
             dataStore,
             dataStore,
             dataStore,
+            diagnosticLogger,
             () => new SftpSession(diagnosticLogger));
         MainWindow.Show();
     }
