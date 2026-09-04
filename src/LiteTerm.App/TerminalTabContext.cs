@@ -20,9 +20,14 @@ internal sealed class TerminalTabContext : IAsyncDisposable
     private readonly CancellationTokenSource _lifetimeCancellation = new();
     private int _disposed;
 
-    public TerminalTabContext(ISshTerminalSession session, WebView2 webView, Dispatcher dispatcher)
+    public TerminalTabContext(
+        ISshTerminalSession session,
+        ILocalTerminalSession localSession,
+        WebView2 webView,
+        Dispatcher dispatcher)
     {
         Session = session;
+        LocalSession = localSession;
         WebView = webView;
         LifetimeToken = _lifetimeCancellation.Token;
         OutputBuffer = new BoundedTerminalOutputBuffer(1024 * 1024);
@@ -35,6 +40,7 @@ internal sealed class TerminalTabContext : IAsyncDisposable
     }
 
     public ISshTerminalSession Session { get; }
+    public ILocalTerminalSession LocalSession { get; }
     public WebView2 WebView { get; }
     public CancellationToken LifetimeToken { get; }
     public BoundedTerminalOutputBuffer OutputBuffer { get; }
@@ -52,8 +58,10 @@ internal sealed class TerminalTabContext : IAsyncDisposable
     public TerminalInitializationState TerminalInitializationState { get; private set; }
     public TerminalInitializationFailure? LastTerminalInitializationFailure { get; private set; }
     public Task<bool>? TerminalInitializationTask { get; set; }
+    public Task? LocalTerminalStartTask { get; set; }
     public bool HasConnectionHistory { get; set; }
     public bool HasSuccessfulConnection { get; set; }
+    public bool IsRemoteConnectionRequested { get; set; }
     public bool AutoReconnectEnabled { get; set; }
     public bool IsAutomaticReconnectAttempt { get; set; }
     public int AutoReconnectAttemptCount { get; set; }
@@ -202,7 +210,9 @@ internal sealed class TerminalTabContext : IAsyncDisposable
         {
             await Task.WhenAll(_ownedWindows.ToArray().Select(window => window.CloseAndWaitAsync()));
             _ownedWindows.Clear();
-            await Session.DisposeAsync();
+            await Task.WhenAll(
+                Session.DisposeAsync().AsTask(),
+                LocalSession.DisposeAsync().AsTask());
         }
         finally
         {
@@ -211,6 +221,7 @@ internal sealed class TerminalTabContext : IAsyncDisposable
             AutoReconnectCancellation?.Dispose();
             AutoReconnectCancellation = null;
             AutoReconnectTask = null;
+            LocalTerminalStartTask = null;
             ActiveConnectionOptions = null;
             ActiveServerProfileId = null;
             LastConnectionOptions = null;

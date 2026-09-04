@@ -1,6 +1,7 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.IO;
+using System.Text;
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
@@ -23,6 +24,7 @@ namespace LiteTerm.App;
 public partial class MainWindow : Window
 {
     private readonly Func<ISshTerminalSession> _sshSessionFactory;
+    private readonly Func<ILocalTerminalSession> _localTerminalSessionFactory;
     private readonly IServerProfileRepository _dataStore;
     private readonly IKnownHostStore _knownHostStore;
     private readonly IApplicationAppearanceSettingsStore _appearanceSettingsStore;
@@ -45,6 +47,7 @@ public partial class MainWindow : Window
 
     public MainWindow(
         Func<ISshTerminalSession> sshSessionFactory,
+        Func<ILocalTerminalSession> localTerminalSessionFactory,
         IServerProfileRepository dataStore,
         IKnownHostStore knownHostStore,
         IApplicationAppearanceSettingsStore appearanceSettingsStore,
@@ -54,6 +57,7 @@ public partial class MainWindow : Window
         Func<ISftpSession> sftpSessionFactory)
     {
         ArgumentNullException.ThrowIfNull(sshSessionFactory);
+        ArgumentNullException.ThrowIfNull(localTerminalSessionFactory);
         ArgumentNullException.ThrowIfNull(dataStore);
         ArgumentNullException.ThrowIfNull(knownHostStore);
         ArgumentNullException.ThrowIfNull(appearanceSettingsStore);
@@ -62,6 +66,7 @@ public partial class MainWindow : Window
         ArgumentNullException.ThrowIfNull(diagnosticLogger);
         ArgumentNullException.ThrowIfNull(sftpSessionFactory);
         _sshSessionFactory = sshSessionFactory;
+        _localTerminalSessionFactory = localTerminalSessionFactory;
         _dataStore = dataStore;
         _knownHostStore = knownHostStore;
         _appearanceSettingsStore = appearanceSettingsStore;
@@ -193,6 +198,24 @@ public partial class MainWindow : Window
             }
         }
 
+        if (!_terminalTabs.Contains(tab) || tab.LifetimeToken.IsCancellationRequested)
+        {
+            return;
+        }
+
+        tab.IsRemoteConnectionRequested = true;
+        if (!await StopLocalTerminalForRemoteAsync(tab, isAutomaticReconnect))
+        {
+            tab.IsRemoteConnectionRequested = false;
+            return;
+        }
+
+        if (!_terminalTabs.Contains(tab) || tab.LifetimeToken.IsCancellationRequested)
+        {
+            tab.IsRemoteConnectionRequested = false;
+            return;
+        }
+
         using var connectionCancellation = CancellationTokenSource.CreateLinkedTokenSource(
             tab.LifetimeToken,
             cancellationToken);
@@ -263,6 +286,12 @@ public partial class MainWindow : Window
             {
                 tab.ConnectionCancellation = null;
             }
+            tab.IsRemoteConnectionRequested = false;
+        }
+
+        if (!connected)
+        {
+            _ = EnsureLocalTerminalAsync(tab);
         }
 
         if (connected && savedProfile is not null)
@@ -317,9 +346,15 @@ public partial class MainWindow : Window
         {
             DefaultBackgroundColor = System.Drawing.ColorTranslator.FromHtml(_terminalAppearance.BackgroundColor)
         };
-        var tab = new TerminalTabContext(_sshSessionFactory(), webView, Dispatcher);
+        var tab = new TerminalTabContext(
+            _sshSessionFactory(),
+            _localTerminalSessionFactory(),
+            webView,
+            Dispatcher);
         tab.Session.OutputReceived += Session_OutputReceived;
         tab.Session.StateChanged += Session_StateChanged;
+        tab.LocalSession.OutputReceived += LocalSession_OutputReceived;
+        tab.LocalSession.Exited += LocalSession_Exited;
         _terminalTabs.Add(tab);
 
         var tabItem = new TabItem
@@ -526,6 +561,8 @@ public partial class MainWindow : Window
 
         tab.Session.OutputReceived -= Session_OutputReceived;
         tab.Session.StateChanged -= Session_StateChanged;
+        tab.LocalSession.OutputReceived -= LocalSession_OutputReceived;
+        tab.LocalSession.Exited -= LocalSession_Exited;
         if (tab.WebView.CoreWebView2 is not null)
         {
             tab.WebView.CoreWebView2.WebMessageReceived -= Terminal_WebMessageReceived;
@@ -581,7 +618,9 @@ public partial class MainWindow : Window
                 SetStatus(
                     tab.AutoReconnectTask is { IsCompleted: false } && tab.AutoReconnectAttemptCount > 0
                         ? $"正在等待自动重连（{tab.AutoReconnectAttemptCount}/{TerminalAutoReconnectPolicy.MaximumAttempts}）…"
-                        : tab.Session.LastFailure?.UserMessage ?? "连接失败",
+                        : tab.LocalSession.IsRunning
+                            ? $"{tab.Session.LastFailure?.UserMessage ?? "连接失败"}；本地终端可用"
+                            : tab.Session.LastFailure?.UserMessage ?? "连接失败",
                     tab.AutoReconnectTask is { IsCompleted: false } ? "#F59E0B" : "#EF4444");
                 SetConnectionControls(true);
                 break;
@@ -590,7 +629,9 @@ public partial class MainWindow : Window
                     ? tab.LastTerminalInitializationFailure?.UserMessage
                       ?? "终端组件初始化失败，请重试终端。"
                     : tab.TerminalReady
-                        ? "终端已就绪"
+                        ? tab.LocalSession.IsRunning
+                            ? "本地终端"
+                            : "正在启动本地终端…"
                         : "正在初始化终端…",
                     tab.TerminalInitializationState == TerminalInitializationState.Failed ? "#EF4444" : "#9CA3AF");
                 SetConnectionControls(true);
@@ -600,7 +641,12 @@ public partial class MainWindow : Window
 
     private void UpdateTabHeader(TerminalTabContext tab)
     {
-        var text = TerminalTabTitle.Format(tab.DisplayName, tab.Session.State, tab.HasConnectionHistory);
+        var text = tab.LocalSession.IsRunning
+                   && tab.Session.State is (ConnectionState.Disconnected or ConnectionState.Failed)
+            ? tab.HasConnectionHistory
+                ? $"{tab.DisplayName} · 本地"
+                : "本地终端"
+            : TerminalTabTitle.Format(tab.DisplayName, tab.Session.State, tab.HasConnectionHistory);
         var tabItem = TerminalTabs.Items.OfType<TabItem>().FirstOrDefault(item => ReferenceEquals(item.Tag, tab));
         if (tabItem?.Header is StackPanel panel && panel.Children[0] is TextBlock title)
         {
@@ -730,6 +776,7 @@ public partial class MainWindow : Window
                     {
                         UpdateCurrentTabState(tab);
                     }
+                    _ = EnsureLocalTerminalAsync(tab);
                     break;
                 case "input" when root.TryGetProperty("data", out var dataElement):
                     _ = SendTerminalInputAsync(tab, dataElement.GetString() ?? string.Empty);
@@ -742,7 +789,24 @@ public partial class MainWindow : Window
                     {
                         SizeText.Text = $"{tab.Columns} × {tab.Rows}";
                     }
-                    tab.Session.Resize(tab.Columns, tab.Rows);
+                    if (tab.Session.State == ConnectionState.Connected)
+                    {
+                        tab.Session.Resize(tab.Columns, tab.Rows);
+                    }
+                    else
+                    {
+                        try
+                        {
+                            tab.LocalSession.Resize(tab.Columns, tab.Rows);
+                        }
+                        catch (Exception exception)
+                        {
+                            _ = WriteLocalTerminalDiagnosticAsync(
+                                "local_terminal_resize_failed",
+                                exception,
+                                ConnectionOperation.Resize);
+                        }
+                    }
                     break;
             }
         }
@@ -757,19 +821,46 @@ public partial class MainWindow : Window
         var cancellationToken = tab.LifetimeToken;
         try
         {
-            await tab.Session.SendAsync(input, cancellationToken);
+            if (tab.Session.State == ConnectionState.Connected)
+            {
+                await tab.Session.SendAsync(input, cancellationToken);
+                return;
+            }
+
+            if (tab.Session.State is ConnectionState.Connecting or ConnectionState.Disconnecting)
+            {
+                return;
+            }
+
+            await EnsureLocalTerminalAsync(tab);
+            if (tab.LocalSession.IsRunning)
+            {
+                await tab.LocalSession.SendAsync(input, cancellationToken);
+            }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             // Closing the owning tab cancels pending terminal writes without changing another tab's status.
         }
-        catch (Exception)
+        catch (Exception exception)
         {
+            if (tab.Session.State != ConnectionState.Connected)
+            {
+                await WriteLocalTerminalDiagnosticAsync(
+                    "local_terminal_send_failed",
+                    exception,
+                    ConnectionOperation.Send);
+            }
+
             await Dispatcher.InvokeAsync(() =>
             {
                 if (_terminalTabs.Contains(tab) && ReferenceEquals(tab, CurrentTab))
                 {
-                    SetStatus("终端输入发送失败，连接可能已中断。", "#EF4444");
+                    SetStatus(
+                        tab.Session.State == ConnectionState.Connected
+                            ? "终端输入发送失败，连接可能已中断。"
+                            : "本地终端输入发送失败。",
+                        "#EF4444");
                 }
             });
         }
@@ -1383,6 +1474,163 @@ public partial class MainWindow : Window
         _terminalTabs.FirstOrDefault(tab => ReferenceEquals(tab.Session, sender))?.EnqueueOutput(eventArgs.Data.Span);
     }
 
+    private void LocalSession_OutputReceived(object? sender, TerminalOutputEventArgs eventArgs)
+    {
+        _terminalTabs.FirstOrDefault(tab => ReferenceEquals(tab.LocalSession, sender))
+            ?.EnqueueOutput(eventArgs.Data.Span);
+    }
+
+    private void LocalSession_Exited(object? sender, LocalTerminalExitedEventArgs eventArgs)
+    {
+        var tab = _terminalTabs.FirstOrDefault(candidate => ReferenceEquals(candidate.LocalSession, sender));
+        if (tab is null || tab.Session.State is ConnectionState.Connecting or ConnectionState.Connected)
+        {
+            return;
+        }
+
+        tab.EnqueueOutput(Encoding.UTF8.GetBytes(
+            $"\r\n[LiteTerm：本地终端已退出（代码 {eventArgs.ExitCode}），继续输入将重新启动。]\r\n"));
+        _ = Dispatcher.InvokeAsync(() =>
+        {
+            if (!_terminalTabs.Contains(tab))
+            {
+                return;
+            }
+
+            UpdateTabHeader(tab);
+            if (ReferenceEquals(tab, CurrentTab))
+            {
+                SetStatus("本地终端已退出，继续输入将重新启动。", "#9CA3AF");
+            }
+        });
+    }
+
+    private async Task<bool> StopLocalTerminalForRemoteAsync(
+        TerminalTabContext tab,
+        bool isAutomaticReconnect)
+    {
+        try
+        {
+            await tab.LocalSession.StopAsync();
+            UpdateTabHeader(tab);
+            return true;
+        }
+        catch (Exception exception)
+        {
+            await WriteLocalTerminalDiagnosticAsync(
+                "local_terminal_stop_failed",
+                exception,
+                ConnectionOperation.Stop);
+            if (_terminalTabs.Contains(tab) && ReferenceEquals(tab, CurrentTab))
+            {
+                SetStatus("无法停止本地终端，未发起 SSH 连接。", "#EF4444");
+                SetConnectionControls(true);
+                if (!isAutomaticReconnect)
+                {
+                    MessageBox.Show(this,
+                        "无法停止当前本地终端，请关闭该标签后重试。",
+                        "本地终端", MessageBoxButton.OK, MessageBoxImage.Error);
+                }
+            }
+
+            return false;
+        }
+    }
+
+    private async Task EnsureLocalTerminalAsync(TerminalTabContext tab)
+    {
+        if (tab.LocalTerminalStartTask is { } existingTask)
+        {
+            await existingTask;
+            return;
+        }
+
+        var startTask = StartLocalTerminalCoreAsync(tab);
+        tab.LocalTerminalStartTask = startTask;
+        try
+        {
+            await startTask;
+        }
+        finally
+        {
+            if (ReferenceEquals(tab.LocalTerminalStartTask, startTask))
+            {
+                tab.LocalTerminalStartTask = null;
+            }
+        }
+    }
+
+    private async Task StartLocalTerminalCoreAsync(TerminalTabContext tab)
+    {
+        if (!_terminalTabs.Contains(tab)
+            || !tab.TerminalReady
+            || tab.LocalSession.IsRunning
+            || tab.IsRemoteConnectionRequested
+            || tab.Session.State is ConnectionState.Connecting or ConnectionState.Connected
+                or ConnectionState.Disconnecting)
+        {
+            return;
+        }
+
+        try
+        {
+            await tab.LocalSession.StartAsync(tab.Columns, tab.Rows, tab.LifetimeToken);
+            if (!_terminalTabs.Contains(tab))
+            {
+                return;
+            }
+
+            UpdateTabHeader(tab);
+            if (ReferenceEquals(tab, CurrentTab))
+            {
+                UpdateCurrentTabState(tab);
+                tab.WebView.Focus();
+            }
+        }
+        catch (OperationCanceledException) when (tab.LifetimeToken.IsCancellationRequested)
+        {
+            // Closing the owning tab cancels local terminal startup.
+        }
+        catch (Exception exception)
+        {
+            await WriteLocalTerminalDiagnosticAsync(
+                "local_terminal_start_failed",
+                exception,
+                ConnectionOperation.Start);
+            if (!_terminalTabs.Contains(tab))
+            {
+                return;
+            }
+
+            tab.EnqueueOutput(Encoding.UTF8.GetBytes(
+                "\r\n[LiteTerm：无法启动本地终端，请关闭该标签后重试。]\r\n"));
+            if (ReferenceEquals(tab, CurrentTab))
+            {
+                SetStatus("本地终端启动失败。", "#EF4444");
+            }
+        }
+    }
+
+    private async ValueTask WriteLocalTerminalDiagnosticAsync(
+        string failureCode,
+        Exception exception,
+        ConnectionOperation operation)
+    {
+        try
+        {
+            await _diagnosticLogger.WriteAsync(new ConnectionDiagnosticEntry(
+                DateTimeOffset.UtcNow,
+                ConnectionProtocol.Terminal,
+                operation,
+                failureCode,
+                exception.GetType().FullName ?? exception.GetType().Name));
+        }
+        catch
+        {
+            // Diagnostic logging must not prevent local terminal recovery or SSH connection.
+        }
+    }
+
     private void Session_StateChanged(object? sender, ConnectionState state)
     {
         _ = Dispatcher.InvokeAsync(() =>
@@ -1397,6 +1645,7 @@ public partial class MainWindow : Window
             {
                 tab.ActiveConnectionOptions = null;
                 tab.ActiveServerProfileId = null;
+                _ = EnsureLocalTerminalAsync(tab);
             }
             UpdateTabHeader(tab);
             if (!ReferenceEquals(tab, CurrentTab))
@@ -1424,12 +1673,10 @@ public partial class MainWindow : Window
                     SetConnectionControls(false);
                     break;
                 case ConnectionState.Disconnected:
-                    SetStatus("已断开", "#9CA3AF");
-                    SetConnectionControls(true);
+                    UpdateCurrentTabState(tab);
                     break;
                 case ConnectionState.Failed:
-                    SetStatus(tab.Session.LastFailure?.UserMessage ?? "连接失败", "#EF4444");
-                    SetConnectionControls(true);
+                    UpdateCurrentTabState(tab);
                     break;
             }
 
@@ -1630,6 +1877,8 @@ public partial class MainWindow : Window
         {
             tab.Session.OutputReceived -= Session_OutputReceived;
             tab.Session.StateChanged -= Session_StateChanged;
+            tab.LocalSession.OutputReceived -= LocalSession_OutputReceived;
+            tab.LocalSession.Exited -= LocalSession_Exited;
         }
 
         try

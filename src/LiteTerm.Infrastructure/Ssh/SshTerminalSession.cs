@@ -82,6 +82,8 @@ public sealed class SshTerminalSession : ISshTerminalSession
                 0,
                 16 * 1024);
             shell.DataReceived += OnShellDataReceived;
+            shell.ErrorOccurred += OnShellErrorOccurred;
+            shell.Closed += OnShellClosed;
             _shell = shell;
 
             SetState(ConnectionState.Connected);
@@ -187,6 +189,16 @@ public sealed class SshTerminalSession : ISshTerminalSession
         OutputReceived?.Invoke(this, new TerminalOutputEventArgs(eventArgs.Data));
     }
 
+    private void OnShellErrorOccurred(object? sender, ExceptionEventArgs eventArgs)
+    {
+        _ = TransitionToFailedAsync(eventArgs.Exception, ConnectionOperation.Transport);
+    }
+
+    private void OnShellClosed(object? sender, EventArgs eventArgs)
+    {
+        _ = TransitionToDisconnectedAsync();
+    }
+
     private void OnClientErrorOccurred(object? sender, ExceptionEventArgs eventArgs)
     {
         _ = TransitionToFailedAsync(eventArgs.Exception, ConnectionOperation.Transport);
@@ -228,6 +240,49 @@ public sealed class SshTerminalSession : ISshTerminalSession
     {
         State = state;
         StateChanged?.Invoke(this, state);
+    }
+
+    private async Task TransitionToDisconnectedAsync()
+    {
+        if (IsDisposingOrDisposed)
+        {
+            return;
+        }
+
+        try
+        {
+            await _lifecycleLock.WaitAsync().ConfigureAwait(false);
+        }
+        catch (ObjectDisposedException)
+        {
+            return;
+        }
+
+        try
+        {
+            if (State != ConnectionState.Connected)
+            {
+                return;
+            }
+
+            if (_client?.IsConnected == true)
+            {
+                DisposeConnection();
+                LastFailure = null;
+                SetState(ConnectionState.Disconnected);
+            }
+            else
+            {
+                DisposeConnection();
+                await SetFailureAsync(
+                    new SshConnectionException("SSH transport closed."),
+                    ConnectionOperation.Transport).ConfigureAwait(false);
+            }
+        }
+        finally
+        {
+            _lifecycleLock.Release();
+        }
     }
 
     private bool IsDisposingOrDisposed => Volatile.Read(ref _disposeStarted) != 0;
@@ -310,6 +365,8 @@ public sealed class SshTerminalSession : ISshTerminalSession
         if (shell is not null)
         {
             shell.DataReceived -= OnShellDataReceived;
+            shell.ErrorOccurred -= OnShellErrorOccurred;
+            shell.Closed -= OnShellClosed;
             try
             {
                 shell.Dispose();

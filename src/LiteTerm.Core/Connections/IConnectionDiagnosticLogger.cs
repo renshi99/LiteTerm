@@ -30,5 +30,7 @@ public enum ConnectionOperation
     Transport,
     Send,
     Resize,
-    Initialize
+    Initialize,
+    Start,
+    Stop
 }

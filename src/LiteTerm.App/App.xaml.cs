@@ -7,6 +7,7 @@ using LiteTerm.Infrastructure.Diagnostics;
 using LiteTerm.Infrastructure.Security;
 using LiteTerm.Infrastructure.Sftp;
 using LiteTerm.Infrastructure.Ssh;
+using LiteTerm.Infrastructure.Terminal;
 
 namespace LiteTerm.App;
 
@@ -31,6 +32,7 @@ public partial class App : System.Windows.Application
 
         MainWindow = new MainWindow(
             () => new SshTerminalSession(diagnosticLogger),
+            () => new WindowsPseudoConsoleSession(),
             dataStore,
             dataStore,
             dataStore,
